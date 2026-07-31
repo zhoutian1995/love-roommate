@@ -1,4 +1,4 @@
 interface:
   display_name: "照片桌宠方法与校验"
   short_description: "诊断照片、选择模式，指导生成素材并校验跨平台桌宠成品"
-  default_prompt: "使用 $build-photo-desktop-pet，先诊断我上传的照片并让我选择哪位是自己、桌宠模式和接力顺序，再指导我生成自己的素材、检查效果并构建跨平台桌宠。"
+  default_prompt: "使用 $love-roommate，先诊断我上传的照片并让我选择哪位是自己、桌宠模式和接力顺序，再指导我生成自己的素材、检查效果并构建跨平台桌宠。"

@@ -1,5 +1,5 @@
 ---
-name: build-photo-desktop-pet
+name: love-roommate
 description: Diagnose a photo containing one to eight people, let the user identify themselves and choose normal, mouse-centipede, sequential poop-relay, or combined behavior, then guide their own image generation, validate the assets, and build a configurable cross-platform Electron desktop-pet project. Use for photo/group-photo desktop pets, crawling swarms, identity/action-sheet methods, transparent sprite checking, mouse-following formations, ordered eat-then-drop relays, portable Windows app folders, or unsigned Apple-silicon macOS apps.
 ---
 
