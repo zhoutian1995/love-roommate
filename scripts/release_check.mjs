@@ -37,13 +37,17 @@ for (const lockRoot of lockRoots) {
   if (!fs.existsSync(path.join(lockRoot, 'pnpm-lock.yaml'))) failures.push(`Missing lockfile: ${path.relative(skillRoot, lockRoot)}`);
 }
 const pnpmCandidates = [
-  process.env.CODEX_PNPM ? { command: process.env.CODEX_PNPM, prefix: [] } : null,
-  { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', prefix: [] },
-  { command: process.platform === 'win32' ? 'corepack.cmd' : 'corepack', prefix: ['pnpm'] }
+  process.env.CODEX_PNPM ? {
+    command: process.env.CODEX_PNPM,
+    prefix: [],
+    shell: process.platform === 'win32' && process.env.CODEX_PNPM.endsWith('.cmd')
+  } : null,
+  { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', prefix: [], shell: true },
+  { command: process.platform === 'win32' ? 'corepack.cmd' : 'corepack', prefix: ['pnpm'], shell: true }
 ].filter(Boolean);
 const pnpm = pnpmCandidates.find((candidate) => spawnSync(candidate.command, [...candidate.prefix, '--version'], {
   stdio: 'ignore',
-  shell: process.platform === 'win32' && candidate.command.endsWith('.cmd')
+  shell: candidate.shell
 }).status === 0);
 if (!pnpm) failures.push('pnpm is required to validate frozen runtime lockfiles. Pass --pnpm through CODEX_PNPM or install the pinned CI pnpm.');
 else {
@@ -51,7 +55,7 @@ else {
     `Frozen lockfile ${path.basename(lockRoot)}`,
     pnpm.command,
     [...pnpm.prefix, 'install', '--lockfile-only', '--frozen-lockfile', '--registry', 'https://registry.npmjs.org'],
-    { cwd: lockRoot }
+    { cwd: lockRoot, shell: pnpm.shell }
   );
 }
 run('Security hardening tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'security-hardening.test.mjs'), path.join(skillRoot, 'scripts', 'tests', 'runtime-security.test.mjs')]);
