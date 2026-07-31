@@ -36,11 +36,23 @@ const lockRoots = ['sharp', 'electron'].map((kind) => path.join(skillRoot, 'asse
 for (const lockRoot of lockRoots) {
   if (!fs.existsSync(path.join(lockRoot, 'pnpm-lock.yaml'))) failures.push(`Missing lockfile: ${path.relative(skillRoot, lockRoot)}`);
 }
-const pnpmCandidates = [process.env.CODEX_PNPM, process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'].filter(Boolean);
-const pnpm = pnpmCandidates.find((candidate) => spawnSync(candidate, ['--version'], { stdio: 'ignore', shell: process.platform === 'win32' && candidate.endsWith('.cmd') }).status === 0);
+const pnpmCandidates = [
+  process.env.CODEX_PNPM ? { command: process.env.CODEX_PNPM, prefix: [] } : null,
+  { command: process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm', prefix: [] },
+  { command: process.platform === 'win32' ? 'corepack.cmd' : 'corepack', prefix: ['pnpm'] }
+].filter(Boolean);
+const pnpm = pnpmCandidates.find((candidate) => spawnSync(candidate.command, [...candidate.prefix, '--version'], {
+  stdio: 'ignore',
+  shell: process.platform === 'win32' && candidate.command.endsWith('.cmd')
+}).status === 0);
 if (!pnpm) failures.push('pnpm is required to validate frozen runtime lockfiles. Pass --pnpm through CODEX_PNPM or install the pinned CI pnpm.');
 else {
-  for (const lockRoot of lockRoots) run(`Frozen lockfile ${path.basename(lockRoot)}`, pnpm, ['install', '--lockfile-only', '--frozen-lockfile', '--registry', 'https://registry.npmjs.org'], { cwd: lockRoot });
+  for (const lockRoot of lockRoots) run(
+    `Frozen lockfile ${path.basename(lockRoot)}`,
+    pnpm.command,
+    [...pnpm.prefix, 'install', '--lockfile-only', '--frozen-lockfile', '--registry', 'https://registry.npmjs.org'],
+    { cwd: lockRoot }
+  );
 }
 run('Security hardening tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'security-hardening.test.mjs'), path.join(skillRoot, 'scripts', 'tests', 'runtime-security.test.mjs')]);
 run('Template unit tests', process.execPath, ['--test', path.join(skillRoot, 'assets', 'electron-template', 'tests', 'behavior-engine.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'config.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'security.test.mjs')]);
