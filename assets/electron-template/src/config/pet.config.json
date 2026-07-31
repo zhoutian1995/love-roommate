@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "app": {
-    "name": "Photo Desktop Pet",
-    "id": "com.codex.photo-desktop-pet",
+    "name": "Love Roommate",
+    "id": "com.codex.love-roommate",
     "version": "1.0.0"
   },
   "render": {

@@ -46,7 +46,7 @@ export function slugify(value) {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 48);
-  return slug || 'photo-desktop-pet';
+  return slug || 'love-roommate';
 }
 
 function installWithFallback(manager, project, options = {}) {

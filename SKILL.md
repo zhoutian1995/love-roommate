@@ -3,7 +3,7 @@ name: love-roommate
 description: Diagnose a photo containing one to eight people, let the user identify themselves and choose normal, mouse-centipede, sequential poop-relay, or combined behavior, then guide their own image generation, validate the assets, and build a configurable cross-platform Electron desktop-pet project. Use for photo/group-photo desktop pets, crawling swarms, identity/action-sheet methods, transparent sprite checking, mouse-following formations, ordered eat-then-drop relays, portable Windows app folders, or unsigned Apple-silicon macOS apps.
 ---
 
-# Build Photo Desktop Pet
+# Love Roommate
 
 Operate as a reusable method, mode library, and validation harness, not as a bundled character-asset pack. Diagnose the input, offer supported modes, guide the current user through generating and approving their own assets, process those assets, validate the result, and package an editable project. The published Skill contains no person's photo or generated character art.
 

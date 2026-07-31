@@ -13,7 +13,7 @@ if (!fs.existsSync(electronDist)) {
 }
 
 const productName = packageJson.petBuild?.productName || config.app.name;
-const safeName = productName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() || 'Photo Desktop Pet';
+const safeName = productName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() || 'Love Roommate';
 const appId = packageJson.petBuild?.appId || config.app.id;
 const distRoot = path.join(root, 'dist');
 

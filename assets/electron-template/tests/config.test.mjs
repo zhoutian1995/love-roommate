@@ -5,9 +5,18 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const config = JSON.parse(fs.readFileSync(path.join(root, 'src/config/pet.config.json'), 'utf8'));
 const behaviors = JSON.parse(fs.readFileSync(path.join(root, 'src/config/behaviors.json'), 'utf8'));
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'src/assets/sprites/manifest.json'), 'utf8'));
+
+test('default template uses the Love Roommate brand', () => {
+  assert.equal(packageJson.name, 'love-roommate');
+  assert.equal(packageJson.petBuild.productName, 'Love Roommate');
+  assert.equal(packageJson.petBuild.appId, 'com.codex.love-roommate');
+  assert.equal(config.app.name, 'Love Roommate');
+  assert.equal(config.app.id, 'com.codex.love-roommate');
+});
 
 test('public configuration stays inside v1 contract', () => {
   assert.equal(config.schemaVersion, 1);
