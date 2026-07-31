@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "app": {
+    "name": "Photo Desktop Pet",
+    "id": "com.codex.photo-desktop-pet",
+    "version": "1.0.0"
+  },
+  "render": {
+    "spriteSize": 112,
+    "windowSize": 180,
+    "effectSize": 32,
+    "alwaysOnTop": true
+  },
+  "characters": [
+    {
+      "id": "person-1",
+      "displayName": "人物 1",
+      "hueRotate": 0
+    }
+  ],
+  "selection": {
+    "mode": "centipede",
+    "userCharacterId": null
+  },
+  "packaging": {
+    "windowsTarget": "portable",
+    "macTarget": "dir",
+    "macArch": "arm64"
+  }
+}

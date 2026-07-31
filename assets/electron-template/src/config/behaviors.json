@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phrases": {
+    "dad": "爸爸！",
+    "grandpa": "爷爷！"
+  },
+  "hotkeys": {
+    "dad": "CommandOrControl+Alt+B",
+    "grandpa": "CommandOrControl+Alt+G",
+    "centipede": "CommandOrControl+Alt+C",
+    "poopChase": "CommandOrControl+Alt+E",
+    "pause": "CommandOrControl+Alt+P"
+  },
+  "freeRoam": {
+    "speedMin": 34,
+    "speedMax": 72,
+    "turnIntervalMs": 3200
+  },
+  "randomDad": {
+    "enabled": true,
+    "minDelayMs": 9000,
+    "maxDelayMs": 22000,
+    "groupChance": 0.28,
+    "durationMs": 1500
+  },
+  "centipede": {
+    "enabled": true,
+    "maxSpeed": 760,
+    "followStrength": 7.5,
+    "gap": 7,
+    "poopCursor": true,
+    "flies": true,
+    "slime": true,
+    "exitShout": true
+  },
+  "poopChase": {
+    "enabled": false,
+    "leaderId": "person-1",
+    "followerIds": [],
+    "maxSpeed": 300,
+    "followStrength": 3,
+    "deadZone": 32,
+    "gap": 7,
+    "dropDistance": 88,
+    "minDropIntervalMs": 650,
+    "initialDropDelayMs": 250,
+    "dropVisibleBeforeEatMs": 650,
+    "poopDurationMs": 650,
+    "eatRadius": 48,
+    "eatDurationMs": 420,
+    "consumedDelayMs": 240,
+    "roundResetDelayMs": 600,
+    "maxDroppings": 1,
+    "droppingTtlMs": 20000,
+    "poopSize": 36,
+    "stinkSize": 28
+  },
+  "prankEffects": {
+    "enabled": true
+  }
+}

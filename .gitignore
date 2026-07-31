@@ -1,0 +1,17 @@
+node_modules/
+dist/
+release/
+preview/
+
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.bmp
+*.tif
+*.tiff
+
+.DS_Store
+Thumbs.db
+desktop.ini

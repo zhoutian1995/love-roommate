@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "spriteSize": 112,
+  "characters": [
+    {
+      "id": "person-1",
+      "frames": {
+        "crawl_right": ["placeholder.svg"],
+        "crawl_left": ["placeholder.svg"],
+        "idle_right": ["placeholder.svg"],
+        "idle_left": ["placeholder.svg"],
+        "centipede_right": ["placeholder.svg"],
+        "centipede_left": ["placeholder.svg"],
+        "shout": ["placeholder.svg"],
+        "drag": ["placeholder.svg"]
+      },
+      "anchors": {
+        "right": {
+          "head": [0.82, 0.38],
+          "rear": [0.18, 0.62]
+        },
+        "left": {
+          "head": [0.18, 0.38],
+          "rear": [0.82, 0.62]
+        }
+      }
+    }
+  ]
+}
