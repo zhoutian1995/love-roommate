@@ -17,6 +17,10 @@ const safeName = productName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() |
 const appId = packageJson.petBuild?.appId || config.app.id;
 const distRoot = path.join(root, 'dist');
 
+function relativeOutput(file) {
+  return path.relative(root, file).replaceAll('\\', '/');
+}
+
 function prepareOutput(output) {
   fs.rmSync(output, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(output), { recursive: true });
@@ -45,7 +49,7 @@ if (process.platform === 'win32' && process.arch === 'x64') {
   if (!fs.existsSync(originalExecutable)) throw new Error(`Electron executable is missing: ${originalExecutable}`);
   fs.renameSync(originalExecutable, executable);
   installApp(path.join(output, 'resources'));
-  console.log(JSON.stringify({ platform: 'windows', output, executable }, null, 2));
+  console.log(JSON.stringify({ platform: 'windows', output: relativeOutput(output), executable: relativeOutput(executable) }, null, 2));
 } else if (process.platform === 'darwin' && process.arch === 'arm64') {
   const sourceApp = path.join(electronDist, 'Electron.app');
   const output = path.join(distRoot, 'macos', `${safeName}.app`);
@@ -68,7 +72,7 @@ if (process.platform === 'win32' && process.arch === 'x64') {
     const result = spawnSync('/usr/bin/plutil', ['-replace', key, '-string', value, plist], { stdio: 'inherit' });
     if (result.status !== 0) throw new Error(`Could not update ${key} in ${plist}`);
   }
-  console.log(JSON.stringify({ platform: 'macos', output, executable }, null, 2));
+  console.log(JSON.stringify({ platform: 'macos', output: relativeOutput(output), executable: relativeOutput(executable) }, null, 2));
 } else {
   console.error(`Unsupported package host: ${process.platform}/${process.arch}. Use Windows x64 or Apple-silicon macOS.`);
   process.exit(1);

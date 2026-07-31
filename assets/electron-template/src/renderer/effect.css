@@ -1,0 +1,16 @@
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  filter: drop-shadow(0 0 2px rgba(255, 238, 185, 0.95)) drop-shadow(0 2px 2px rgba(0, 0, 0, 0.55));
+}

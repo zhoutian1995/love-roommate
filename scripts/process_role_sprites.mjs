@@ -2,11 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { applyCodexRuntimeArgs, fail, loadSharp, parseArgs, readJson, writeJson } from './lib/common.mjs';
 import { alphaBounds, inferBorderKey, parseHexColor, removeChroma } from './lib/sprite-processing.mjs';
+import { portableRelative } from './lib/privacy.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 applyCodexRuntimeArgs(args);
 if (!args.project || !args.sheet || !args.character || !args.role) {
-  fail('Usage: node process_role_sprites.mjs --project <project> --sheet <sheet.png> --character person-1 --role leader|follower [--key auto|#ff00ff] [--size 112]');
+  fail('Usage: node process_role_sprites.mjs --project <project> --sheet <sheet.png> --character person-1 --role leader|follower --pnpm <codex-pnpm> [--node-modules <codex-node-modules>] [--key auto|#ff00ff] [--size 112]');
 }
 
 const project = path.resolve(args.project);
@@ -16,6 +17,14 @@ const role = String(args.role).toLowerCase();
 if (!['leader', 'follower'].includes(role)) fail('--role must be leader or follower.');
 if (!fs.existsSync(path.join(project, 'package.json'))) fail(`Not a generated project: ${project}`);
 if (!fs.existsSync(sheet)) fail(`Role action sheet does not exist: ${sheet}`);
+const outputRoot = path.dirname(project);
+let sheetRelative;
+try {
+  sheetRelative = portableRelative(outputRoot, sheet, 'Role action sheet');
+} catch (error) {
+  fail(error.message);
+}
+if (!sheetRelative.startsWith('preview/')) fail('Role action sheet must be stored under the project preview directory.');
 
 const configPath = path.join(project, 'src', 'config', 'pet.config.json');
 const manifestPath = path.join(project, 'src', 'assets', 'sprites', 'manifest.json');
@@ -86,6 +95,6 @@ manifestEntry.frames ||= {};
 for (const action of layout) manifestEntry.frames[action] = [`${characterId}/${action}.png`];
 manifest.spriteSize = spriteSize;
 writeJson(manifestPath, manifest);
-writeJson(path.join(outputDir, 'role-processing-report.json'), { characterId, role, sheet, spriteSize, cells: report });
+writeJson(path.join(outputDir, 'role-processing-report.json'), { characterId, role, sheet: sheetRelative, spriteSize, cells: report });
 
 console.log(`Processed ${characterId} ${role} role actions: ${outputDir}`);

@@ -1,13 +1,12 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head><meta charset="UTF-8" /><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}img{width:100%;height:100%;object-fit:contain;pointer-events:none;filter:drop-shadow(0 0 2px rgba(255,238,185,.95)) drop-shadow(0 2px 2px rgba(0,0,0,.55))}</style></head>
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'" />
+    <link rel="stylesheet" href="effect.css" />
+  </head>
   <body>
     <img id="effect" alt="" />
-    <script>
-      const allowed = new Set(['poop', 'flies', 'slime', 'stink']);
-      const requested = new URLSearchParams(window.location.search).get('asset');
-      const asset = allowed.has(requested) ? requested : 'poop';
-      document.getElementById('effect').src = `../assets/effects/${asset}.svg`;
-    </script>
+    <script src="effect.js"></script>
   </body>
 </html>

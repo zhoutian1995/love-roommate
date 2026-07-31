@@ -1,8 +1,20 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const OFFICIAL_NPM_REGISTRY = 'https://registry.npmjs.org';
+const OFFICIAL_ELECTRON_MIRROR = 'https://github.com/electron/electron/releases/download/';
+const PINNED_ELECTRON_VERSION = '41.0.2';
+const PINNED_SHARP_VERSION = '0.34.5';
+const ELECTRON_ARCHIVE_HASHES = {
+  'win32-x64': 'dcd36396a606a5ae2f5651b4ee6bb463a624dbf15f786eda57cee2cc361c138c',
+  'darwin-arm64': '8e18ef53da62bca6132508721c1f94e06b5773b48d366b95e593479892f0a2fe'
+};
 
 export function parseArgs(argv) {
   const result = {};
@@ -49,40 +61,76 @@ export function slugify(value) {
   return slug || 'love-roommate';
 }
 
-function installWithFallback(manager, project, options = {}) {
+function normalizedUrl(value) {
+  return String(value || '').replace(/\/+$/, '').toLowerCase();
+}
+
+export function approvedInstallEnvironment(includeElectronMirror = false, environment = process.env) {
+  const registry = environment.CODEX_NPM_REGISTRY || OFFICIAL_NPM_REGISTRY;
+  const mirror = includeElectronMirror && environment.ELECTRON_MIRROR
+    ? environment.ELECTRON_MIRROR
+    : null;
+  const thirdPartyRegistry = normalizedUrl(registry) !== normalizedUrl(OFFICIAL_NPM_REGISTRY);
+  const thirdPartyMirror = mirror && !normalizedUrl(mirror).startsWith(normalizedUrl(OFFICIAL_ELECTRON_MIRROR));
+  if ((thirdPartyRegistry || thirdPartyMirror) && environment.CODEX_ALLOW_THIRD_PARTY_MIRROR !== '1') {
+    throw new Error('Third-party package mirrors are disabled. Set CODEX_ALLOW_THIRD_PARTY_MIRROR=1 together with the explicit mirror address to opt in.');
+  }
+  if (thirdPartyRegistry || thirdPartyMirror) {
+    console.warn('SECURITY WARNING: using an explicitly authorized third-party package mirror. Package and Electron archive integrity checks remain enabled.');
+  }
+  const env = {
+    ...environment,
+    npm_config_registry: registry,
+    NPM_CONFIG_REGISTRY: registry
+  };
+  if (mirror) env.ELECTRON_MIRROR = mirror;
+  else delete env.ELECTRON_MIRROR;
+  return { env, registry };
+}
+
+function installPinnedRuntime(kind, destination) {
+  const lockRoot = path.join(skillRoot, 'assets', 'runtime-locks', kind);
+  for (const file of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
+    if (!fs.existsSync(path.join(lockRoot, file))) throw new Error(`Pinned ${kind} runtime is missing ${file}.`);
+  }
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') || 'PATH';
   const runtimePath = `${path.dirname(process.execPath)}${path.delimiter}${process.env[pathKey] || ''}`;
-  const install = (extraArgs = [], extraEnv = {}) => spawnSync(manager.command, [...manager.installArgs, ...extraArgs], {
-    cwd: project,
+  const manager = packageManager();
+  const partial = `${destination}.partial-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  fs.rmSync(partial, { recursive: true, force: true });
+  fs.mkdirSync(partial, { recursive: true });
+  for (const file of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
+    fs.copyFileSync(path.join(lockRoot, file), path.join(partial, file));
+  }
+  const installConfig = approvedInstallEnvironment(kind === 'electron');
+  const result = spawnSync(manager.command, [...manager.installArgs, '--registry', installConfig.registry], {
+    cwd: partial,
     stdio: 'inherit',
     shell: process.platform === 'win32' && manager.command.toLowerCase().endsWith('.cmd'),
-    env: { ...process.env, [pathKey]: runtimePath, ...extraEnv }
+    env: { ...installConfig.env, [pathKey]: runtimePath }
   });
-  let result = install();
-  const incomplete = typeof options.isComplete === 'function' && !options.isComplete();
-  if (result.status !== 0 || incomplete) {
-    console.warn(incomplete
-      ? 'Primary package install left an incomplete Electron runtime; cleaning it and retrying once with the configured mirror fallback...'
-      : 'Primary package download failed; cleaning it and retrying once with the configured mirror fallback...');
-    if (typeof options.beforeRetry === 'function') options.beforeRetry();
-    const registry = process.env.CODEX_NPM_REGISTRY || 'https://registry.npmmirror.com';
-    result = install(['--registry', registry], {
-      npm_config_registry: process.env.CODEX_NPM_REGISTRY || 'https://registry.npmmirror.com',
-      NPM_CONFIG_REGISTRY: process.env.CODEX_NPM_REGISTRY || 'https://registry.npmmirror.com',
-      ELECTRON_MIRROR: process.env.ELECTRON_MIRROR || 'https://npmmirror.com/mirrors/electron/'
-    });
+  if (result.status !== 0) {
+    fs.rmSync(partial, { recursive: true, force: true });
+    throw new Error(`Pinned ${kind} runtime installation failed with exit code ${result.status ?? 'unknown'}.`);
   }
-  return result;
+  return partial;
 }
 
 function electronRuntimeLayout(runtimeRoot) {
   const dist = path.join(runtimeRoot, 'node_modules', 'electron', 'dist');
   if (process.platform === 'win32') {
     return {
+      dist,
       executable: path.join(dist, 'electron.exe'),
       requiredFiles: [
         path.join(dist, 'electron.exe'),
         path.join(dist, 'icudtl.dat'),
+        path.join(dist, 'resources.pak'),
+        path.join(dist, 'snapshot_blob.bin'),
+        path.join(dist, 'v8_context_snapshot.bin'),
+        path.join(dist, 'ffmpeg.dll'),
+        path.join(dist, 'libEGL.dll'),
+        path.join(dist, 'libGLESv2.dll'),
         path.join(dist, 'resources', 'default_app.asar'),
         path.join(dist, 'locales', 'en-US.pak')
       ],
@@ -93,6 +141,7 @@ function electronRuntimeLayout(runtimeRoot) {
   const app = path.join(dist, 'Electron.app');
   const framework = path.join(app, 'Contents', 'Frameworks', 'Electron Framework.framework');
   return {
+    dist,
     executable: path.join(app, 'Contents', 'MacOS', 'Electron'),
     requiredFiles: [
       path.join(app, 'Contents', 'MacOS', 'Electron'),
@@ -128,83 +177,153 @@ function electronRuntimeProblems(runtimeRoot) {
   return { ...layout, problems };
 }
 
-function cleanElectronRuntimeInstall(runtimeRoot) {
-  const cacheRoot = path.resolve(path.join(os.tmpdir(), 'codex-electron-runtime'));
-  const resolvedRoot = path.resolve(runtimeRoot);
-  if (path.dirname(resolvedRoot) !== cacheRoot) fail(`Refusing to clean an unexpected Electron cache path: ${resolvedRoot}`);
-  for (const name of ['node_modules', 'pnpm-lock.yaml', 'package-lock.json', 'npm-shrinkwrap.json']) {
-    fs.rmSync(path.join(resolvedRoot, name), { recursive: true, force: true });
+export function electronArchiveSpec(platform = process.platform, arch = process.arch, version = PINNED_ELECTRON_VERSION) {
+  const key = `${platform}-${arch}`;
+  const sha256 = ELECTRON_ARCHIVE_HASHES[key];
+  if (version !== PINNED_ELECTRON_VERSION || !sha256) {
+    throw new Error(`No trusted Electron archive is configured for ${version} ${key}.`);
   }
+  const platformName = platform === 'win32' ? 'win32' : 'darwin';
+  return { filename: `electron-v${version}-${platformName}-${arch}.zip`, sha256 };
+}
+
+export function verifyElectronArchive(file, expectedSha256) {
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) throw new Error(`Electron archive is missing: ${file}`);
+  const actual = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  if (actual !== expectedSha256) throw new Error(`Electron archive checksum mismatch: expected ${expectedSha256}, received ${actual}.`);
+  return actual;
+}
+
+function findFile(root, filename) {
+  if (!root || !fs.existsSync(root)) return null;
+  const stack = [root];
+  while (stack.length) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (entry.isFile() && entry.name === filename) return full;
+    }
+  }
+  return null;
+}
+
+function verifyInstalledElectronArchive(runtimeRoot) {
+  const spec = electronArchiveSpec();
+  const markerPath = path.join(runtimeRoot, 'electron-archive.sha256.json');
+  if (fs.existsSync(markerPath)) {
+    const marker = readJson(markerPath);
+    if (marker.filename === spec.filename && marker.sha256 === spec.sha256) return;
+  }
+  const roots = [
+    process.env.ELECTRON_CACHE,
+    process.platform === 'win32' && process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'electron', 'Cache') : null,
+    process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Caches', 'electron') : null,
+    path.join(os.homedir(), '.cache', 'electron')
+  ].filter(Boolean);
+  const archive = roots.map((root) => findFile(root, spec.filename)).find(Boolean);
+  if (!archive) throw new Error(`Downloaded Electron archive ${spec.filename} was not found in the Electron cache for checksum verification.`);
+  verifyElectronArchive(archive, spec.sha256);
+  writeJson(markerPath, { filename: spec.filename, sha256: spec.sha256 });
 }
 
 export function ensureElectronRuntime(project) {
   const packageJson = readJson(path.join(project, 'package.json'));
   const version = packageJson.devDependencies?.electron || packageJson.dependencies?.electron;
-  if (!version) fail('The generated project does not pin an Electron version.');
+  if (version !== PINNED_ELECTRON_VERSION) fail(`The generated project must pin Electron exactly to ${PINNED_ELECTRON_VERSION}.`);
   const runtimeRoot = path.join(os.tmpdir(), 'codex-electron-runtime', `${version}-${process.platform}-${process.arch}`);
   let status = electronRuntimeProblems(runtimeRoot);
-  if (!status.problems.length) return status.executable;
-  if (fs.existsSync(path.join(runtimeRoot, 'node_modules'))) {
-    console.warn(`Discarding an incomplete Electron cache:\n- ${status.problems.join('\n- ')}`);
-    cleanElectronRuntimeInstall(runtimeRoot);
+  if (!status.problems.length) {
+    try {
+      verifyInstalledElectronArchive(runtimeRoot);
+      return { executable: status.executable, dist: status.dist };
+    } catch (error) {
+      status.problems.push(error.message);
+    }
   }
-  fs.mkdirSync(runtimeRoot, { recursive: true });
-  writeJson(path.join(runtimeRoot, 'package.json'), {
-    name: 'codex-electron-runtime',
-    private: true,
-    devDependencies: { electron: version }
-  });
-  fs.writeFileSync(path.join(runtimeRoot, 'pnpm-workspace.yaml'), 'allowBuilds:\n  electron: true\n', 'utf8');
-  const manager = packageManager();
-  console.log(`Installing the pinned Electron runtime with ${path.basename(manager.command)}...`);
-  const result = installWithFallback(manager, runtimeRoot, {
-    beforeRetry: () => cleanElectronRuntimeInstall(runtimeRoot),
-    isComplete: () => !electronRuntimeProblems(runtimeRoot).problems.length
-  });
+  if (status.problems.length) console.warn(`Refreshing the pinned Electron runtime:\n- ${status.problems.join('\n- ')}`);
+  let partial;
+  try {
+    partial = installPinnedRuntime('electron', runtimeRoot);
+    const partialStatus = electronRuntimeProblems(partial);
+    if (partialStatus.problems.length) throw new Error(`Installed Electron runtime is incomplete:\n- ${partialStatus.problems.join('\n- ')}`);
+    verifyInstalledElectronArchive(partial);
+    fs.rmSync(runtimeRoot, { recursive: true, force: true });
+    fs.renameSync(partial, runtimeRoot);
+  } catch (error) {
+    if (partial) fs.rmSync(partial, { recursive: true, force: true });
+    fail(`Automatic Electron runtime install failed. Keep Codex online and retry. ${error.message}`);
+  }
   status = electronRuntimeProblems(runtimeRoot);
-  if (result.status !== 0 || status.problems.length) {
-    fail(`Automatic Electron runtime install failed. Keep Codex online and retry. Runtime issues:\n- ${status.problems.join('\n- ')}`);
+  return { executable: status.executable, dist: path.join(runtimeRoot, 'node_modules', 'electron', 'dist') };
+}
+
+function errorChain(error) {
+  const messages = [];
+  let current = error;
+  while (current && !messages.includes(current.message)) {
+    messages.push(`${current.code ? `${current.code}: ` : ''}${current.message || String(current)}`);
+    current = current.cause;
   }
-  return status.executable;
+  return messages.join(' <- ');
+}
+
+export function loadSharpFromNodeModules(nodeModulesRoot) {
+  const root = path.resolve(nodeModulesRoot);
+  const requireFromRoot = createRequire(path.join(path.dirname(root), 'package.json'));
+  const packagePath = requireFromRoot.resolve('sharp/package.json');
+  const packageJson = readJson(packagePath);
+  if (packageJson.version !== PINNED_SHARP_VERSION) throw new Error(`Expected Sharp ${PINNED_SHARP_VERSION}, found ${packageJson.version}.`);
+  return requireFromRoot('sharp');
+}
+
+function ensureSharpRuntime() {
+  const runtimeRoot = process.env.CODEX_SHARP_RUNTIME_ROOT
+    ? path.resolve(process.env.CODEX_SHARP_RUNTIME_ROOT)
+    : path.join(os.tmpdir(), 'codex-sharp-runtime', `${PINNED_SHARP_VERSION}-${process.platform}-${process.arch}`);
+  try {
+    return loadSharpFromNodeModules(path.join(runtimeRoot, 'node_modules'));
+  } catch {
+    let partial;
+    try {
+      partial = installPinnedRuntime('sharp', runtimeRoot);
+      const sharp = loadSharpFromNodeModules(path.join(partial, 'node_modules'));
+      fs.rmSync(runtimeRoot, { recursive: true, force: true });
+      fs.renameSync(partial, runtimeRoot);
+      return sharp;
+    } catch (error) {
+      if (partial) fs.rmSync(partial, { recursive: true, force: true });
+      throw error;
+    }
+  }
 }
 
 export function loadSharp(project) {
-  const requireFromProject = createRequire(path.join(project, 'package.json'));
-  try {
-    return requireFromProject('sharp');
-  } catch {
-    if (process.env.CODEX_NODE_MODULES) {
-      const bundled = path.join(process.env.CODEX_NODE_MODULES, 'sharp');
-      if (fs.existsSync(bundled)) return createRequire(import.meta.url)(bundled);
+  const inferred = path.resolve(path.dirname(process.execPath), '..', 'node_modules');
+  const configuredRoot = process.env.CODEX_NODE_MODULES;
+  const roots = [path.resolve(configuredRoot || inferred)];
+  const failures = [];
+  for (const root of roots) {
+    try {
+      return loadSharpFromNodeModules(root);
+    } catch (error) {
+      failures.push(`Codex node_modules ${root}: ${errorChain(error)}`);
     }
   }
-  fail('Codex bundled Sharp runtime was not found. Reload workspace dependencies and pass CODEX_NODE_MODULES.');
+  try {
+    console.warn('Codex bundled Sharp could not be loaded; installing the locked Sharp 0.34.5 runtime from the approved npm registry.');
+    return ensureSharpRuntime();
+  } catch (error) {
+    failures.push(`Locked Sharp fallback: ${errorChain(error)}`);
+  }
+  fail(`Sharp runtime unavailable for ${process.platform}/${process.arch}. Project: ${path.resolve(project)}\n- ${failures.join('\n- ')}`);
 }
 
 export function packageManager() {
-  if (process.env.CODEX_PNPM) {
-    return {
-      command: process.env.CODEX_PNPM,
-      installArgs: ['install', '--no-frozen-lockfile'],
-      runArgs: (args) => args
-    };
-  }
-  const bundledNpm = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
-  const programFilesNpm = process.env.ProgramFiles
-    ? path.join(process.env.ProgramFiles, 'nodejs', 'node_modules', 'npm', 'bin', 'npm-cli.js')
-    : '';
-  const npmCli = [bundledNpm, programFilesNpm].find((candidate) => candidate && fs.existsSync(candidate));
-  if (npmCli) {
-    return {
-      command: process.execPath,
-      installArgs: [npmCli, 'install', '--no-audit', '--no-fund'],
-      runArgs: (args) => [npmCli, ...args]
-    };
-  }
-  const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const command = process.env.CODEX_PNPM || (process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm');
   return {
     command,
-    installArgs: ['install', '--no-audit', '--no-fund'],
+    installArgs: ['install', '--frozen-lockfile'],
     runArgs: (args) => args
   };
 }

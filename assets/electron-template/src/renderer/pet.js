@@ -1,7 +1,5 @@
 'use strict';
 
-const params = new URLSearchParams(window.location.search);
-const characterId = params.get('id');
 const sprite = document.getElementById('sprite');
 const bubble = document.getElementById('bubble');
 const effect = document.getElementById('effect');
@@ -118,7 +116,7 @@ window.addEventListener('contextmenu', (event) => {
 });
 
 (async () => {
-  bootstrap = await window.petApi.getBootstrap(characterId);
+  bootstrap = await window.petApi.getBootstrap();
   document.documentElement.style.setProperty('--sprite-size', `${bootstrap.config.render.spriteSize}px`);
   document.documentElement.style.setProperty('--effect-size', `${bootstrap.config.render.effectSize}px`);
   document.documentElement.style.setProperty('--hue-rotate', `${bootstrap.character.hueRotate || 0}deg`);

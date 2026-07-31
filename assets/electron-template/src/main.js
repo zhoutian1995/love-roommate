@@ -11,13 +11,17 @@ const {
   Menu,
   nativeImage,
   screen,
+  session,
   Tray
 } = require('electron');
 const { BehaviorEngine } = require('./behavior-engine');
+const { authorizePetEvent, denySessionPermissions, hardenWebContents } = require('./security');
 
 const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config', 'pet.config.json'), 'utf8'));
 const behaviors = JSON.parse(fs.readFileSync(path.join(__dirname, 'config', 'behaviors.json'), 'utf8'));
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'assets', 'sprites', 'manifest.json'), 'utf8'));
+const PET_PAGE = path.join(__dirname, 'renderer', 'index.html');
+const EFFECT_PAGE = path.join(__dirname, 'renderer', 'effect.html');
 
 let engine;
 let tray;
@@ -33,6 +37,15 @@ const dragStates = new Map();
 const positionWarnings = new Map();
 const MIN_WINDOW_COORDINATE = -2147483648;
 const MAX_WINDOW_COORDINATE = 2147483647;
+
+function publicErrorMessage(error) {
+  return String(error?.message || error || 'Unknown runtime capture error.')
+    .replace(/(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"'`<>]*/g, '[redacted-path]')
+    .replace(/\\\\[^\s"'`<>]+/g, '[redacted-path]')
+    .replace(/\/(?:Users|home)\/[^\s"'`<>]*/g, '[redacted-path]')
+    .replace(/[\r\n]+/g, ' ')
+    .trim();
+}
 
 function warnPosition(label, message) {
   const now = Date.now();
@@ -65,6 +78,17 @@ function safeSetPosition(win, x, y, label) {
 function smokeDelay(name, fallback, minimum = 100) {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value >= minimum ? Math.round(value) : fallback;
+}
+
+function exitAutomatedTest() {
+  if (quitting) return;
+  quitting = true;
+  if (ticker) clearInterval(ticker);
+  globalShortcut.unregisterAll();
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.destroy();
+  }
+  app.exit(0);
 }
 
 function crc32(buffer) {
@@ -118,11 +142,8 @@ function displays() {
   return screen.getAllDisplays().map((display) => ({ id: display.id, workArea: display.workArea }));
 }
 
-function petIdFromEvent(event) {
-  for (const [id, entry] of [...petWindows]) {
-    if (entry.win.webContents.id === event.sender.id) return id;
-  }
-  return null;
+function petFromEvent(event) {
+  return authorizePetEvent(event, petWindows, PET_PAGE);
 }
 
 function setWindowInteractive(win, interactive) {
@@ -149,9 +170,12 @@ function createPetWindow(character) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      webSecurity: true,
+      webviewTag: false
     }
   });
+  hardenWebContents(win.webContents, PET_PAGE);
   if (config.render.alwaysOnTop) win.setAlwaysOnTop(true, 'floating');
   if (process.platform === 'darwin') win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
   let shown = false;
@@ -163,7 +187,7 @@ function createPetWindow(character) {
   };
   win.once('ready-to-show', showWindow);
   win.webContents.once('did-finish-load', showWindow);
-  win.loadFile(path.join(__dirname, 'renderer', 'index.html'), { query: { id: character.id } });
+  win.loadFile(PET_PAGE);
   win.on('closed', () => petWindows.delete(character.id));
   petWindows.set(character.id, { win, interactive: false });
 }
@@ -179,12 +203,13 @@ function createEffectWindow(asset, size) {
     skipTaskbar: true,
     focusable: false,
     hasShadow: false,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true }
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, webviewTag: false }
   });
+  hardenWebContents(win.webContents, EFFECT_PAGE);
   win.setAlwaysOnTop(true, 'floating');
   if (process.platform === 'darwin') win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
   win.setIgnoreMouseEvents(true, { forward: false });
-  win.loadFile(path.join(__dirname, 'renderer', 'effect.html'), { query: { asset } });
+  win.loadFile(EFFECT_PAGE, { query: { asset } });
   return win;
 }
 
@@ -321,7 +346,7 @@ function startScenarioTest() {
     setTimeout(() => captureScenarioWindows().catch((error) => {
       const outputDir = process.env.PET_SCENARIO_CAPTURE_DIR;
       fs.mkdirSync(outputDir, { recursive: true });
-      fs.writeFileSync(path.join(outputDir, 'capture-error.txt'), `${error.stack || error.message}\n`, 'utf8');
+      fs.writeFileSync(path.join(outputDir, 'capture-error.txt'), `${publicErrorMessage(error)}\n`, 'utf8');
     }), captureAtMs).unref();
   }
   const durationMs = Math.max(3000, Number.parseInt(process.env.PET_SCENARIO_DURATION_MS || '6000', 10));
@@ -331,8 +356,7 @@ function startScenarioTest() {
       fs.mkdirSync(path.dirname(output), { recursive: true });
       fs.writeFileSync(output, `${JSON.stringify({ scenario, direction, originCursor, targetCursor, samples: scenarioTest?.samples || [] }, null, 2)}\n`, 'utf8');
     }
-    quitting = true;
-    app.quit();
+    exitAutomatedTest();
   }, durationMs).unref();
 }
 
@@ -440,33 +464,42 @@ function startTicker() {
 }
 
 function installIpc() {
-  ipcMain.handle('pet:get-bootstrap', (_event, id) => ({
-    config,
-    behaviors,
-    character: config.characters.find((item) => item.id === id),
-    sprite: manifest.characters.find((item) => item.id === id) || manifest.characters[0]
-  }));
+  ipcMain.handle('pet:get-bootstrap', (event) => {
+    const authorized = petFromEvent(event);
+    if (!authorized) throw new Error('Unauthorized pet IPC sender.');
+    return {
+      config,
+      behaviors,
+      character: config.characters.find((item) => item.id === authorized.id),
+      sprite: manifest.characters.find((item) => item.id === authorized.id) || manifest.characters[0]
+    };
+  });
 
   ipcMain.on('pet:set-interactive', (event, interactive) => {
-    const id = petIdFromEvent(event);
-    const entry = petWindows.get(id);
-    if (!entry || entry.interactive === interactive) return;
+    const authorized = petFromEvent(event);
+    if (!authorized || typeof interactive !== 'boolean') return;
+    const { entry } = authorized;
+    if (entry.interactive === interactive) return;
     entry.interactive = interactive;
     setWindowInteractive(entry.win, interactive);
   });
 
   ipcMain.on('pet:context-menu', (event) => {
+    const authorized = petFromEvent(event);
+    if (!authorized) return;
     if (engine.mode === 'centipede' || engine.mode === 'poopChase') {
       if (engine.mode === 'centipede') engine.toggleCentipede(screen.getCursorScreenPoint());
       else engine.togglePoopChase(screen.getCursorScreenPoint());
       refreshTrayMenu();
       return;
     }
-    Menu.buildFromTemplate(menuTemplate()).popup({ window: BrowserWindow.fromWebContents(event.sender) });
+    Menu.buildFromTemplate(menuTemplate()).popup({ window: authorized.entry.win });
   });
 
   ipcMain.on('pet:drag-start', (event) => {
-    const id = petIdFromEvent(event);
+    const authorized = petFromEvent(event);
+    if (!authorized) return;
+    const { id } = authorized;
     const pet = engine.pets.find((item) => item.id === id);
     if (!pet || engine.mode === 'centipede' || engine.mode === 'poopChase') return;
     dragStates.set(id, { cursorStart: screen.getCursorScreenPoint(), petStart: { x: pet.x, y: pet.y } });
@@ -474,8 +507,9 @@ function installIpc() {
   });
 
   ipcMain.on('pet:drag-end', (event) => {
-    const id = petIdFromEvent(event);
-    if (!id) return;
+    const authorized = petFromEvent(event);
+    if (!authorized) return;
+    const { id } = authorized;
     dragStates.delete(id);
     engine.setDragging(id, false);
   });
@@ -487,9 +521,7 @@ async function runSmokeCapture() {
   const captureAtMs = smokeDelay('PET_SMOKE_CAPTURE_AT_MS', 1800);
   const timeoutMs = smokeDelay('PET_SMOKE_TIMEOUT_MS', Math.max(8000, captureAtMs + 5000), captureAtMs + 1000);
   const finish = () => {
-    quitting = true;
-    app.quit();
-    setTimeout(() => app.exit(0), 500).unref();
+    exitAutomatedTest();
   };
   setTimeout(() => {
     const errorPath = path.join(path.dirname(output), 'runtime-smoke-error.txt');
@@ -509,7 +541,7 @@ async function runSmokeCapture() {
       fs.writeFileSync(output, image.toPNG());
     } catch (error) {
       fs.mkdirSync(path.dirname(output), { recursive: true });
-      fs.writeFileSync(path.join(path.dirname(output), 'runtime-smoke-error.txt'), `${error.stack || error.message}\n`, 'utf8');
+      fs.writeFileSync(path.join(path.dirname(output), 'runtime-smoke-error.txt'), `${publicErrorMessage(error)}\n`, 'utf8');
     } finally {
       finish();
     }
@@ -519,6 +551,7 @@ async function runSmokeCapture() {
 if (!app.requestSingleInstanceLock()) app.quit();
 
 app.whenReady().then(() => {
+  denySessionPermissions(session.defaultSession);
   if (process.platform === 'win32') app.setAppUserModelId(config.app.id);
   engine = new BehaviorEngine({ config, behaviors, manifest, displays: displays() });
   installIpc();

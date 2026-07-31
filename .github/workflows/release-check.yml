@@ -1,0 +1,46 @@
+name: Release Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20.19.4'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: pip install --no-cache-dir pyyaml==6.0.2
+      - run: corepack enable && corepack prepare pnpm@11.9.0 --activate
+      - run: python -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/openai/skills/49f948faa9258a0c61caceaf225e179651397431/skills/.system/skill-creator/scripts/quick_validate.py', 'quick_validate.py')"
+      - run: node --test assets/electron-template/tests/behavior-engine.test.mjs assets/electron-template/tests/config.test.mjs assets/electron-template/tests/security.test.mjs
+      - run: node --test scripts/tests/security-hardening.test.mjs scripts/tests/runtime-security.test.mjs
+      - env:
+          OFFICIAL_VALIDATOR_PATH: quick_validate.py
+        run: node scripts/release_check.mjs
+  official-skill-validator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: pip install --no-cache-dir pyyaml==6.0.2
+      - run: |
+          set -e
+          curl -fsSL https://raw.githubusercontent.com/openai/skills/49f948faa9258a0c61caceaf225e179651397431/skills/.system/skill-creator/scripts/quick_validate.py -o quick_validate.py
+          python quick_validate.py .

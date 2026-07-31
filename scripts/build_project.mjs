@@ -5,10 +5,11 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { applyCodexRuntimeArgs, ensureElectronRuntime, fail, parseArgs, readJson } from './lib/common.mjs';
+import { portableRelative } from './lib/privacy.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 applyCodexRuntimeArgs(args);
-if (!args.project) fail('Usage: node build_project.mjs --project <project> [--pnpm <codex-pnpm>] [--node-modules <codex-node-modules>] [--refresh-smoke] [--skip-smoke] [--skip-scenarios] [--verify-only]');
+if (!args.project) fail('Usage: node build_project.mjs --project <project> [--source <original-photo>] [--pnpm <codex-pnpm>] [--node-modules <codex-node-modules>] [--refresh-smoke] [--skip-smoke] [--skip-scenarios] [--verify-only]');
 const project = path.resolve(args.project);
 if (!fs.existsSync(path.join(project, 'package.json'))) fail(`Not a generated project: ${project}`);
 if (process.platform !== 'win32' && !(process.platform === 'darwin' && process.arch === 'arm64')) {
@@ -21,6 +22,8 @@ const preview = path.join(outputRoot, 'preview');
 const runtime = path.join(preview, 'runtime-window.png');
 const config = readJson(path.join(project, 'src', 'config', 'pet.config.json'));
 const behaviors = readJson(path.join(project, 'src', 'config', 'behaviors.json'));
+const productName = config.app?.name || 'Love Roommate';
+const safeName = productName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() || 'Love Roommate';
 const nodeArgs = process.env.CODEX_NODE_MODULES ? ['--node-modules', process.env.CODEX_NODE_MODULES] : [];
 
 function verifyScenarioReport(scenario, reportPath) {
@@ -66,7 +69,9 @@ function runElectron(executable, cwd, extraEnv) {
 
 const validateScript = path.join(skillRoot, 'scripts', 'validate_project.mjs');
 const selfCheckScript = path.join(skillRoot, 'scripts', 'self_check_project.mjs');
-if (!runNode(validateScript, ['--project', project, ...nodeArgs])) fail('Project validation failed.');
+const privacyScript = path.join(skillRoot, 'scripts', 'audit_output_privacy.mjs');
+const sourceArgs = typeof args.source === 'string' ? ['--source', path.resolve(args.source)] : [];
+if (!runNode(validateScript, ['--project', project, ...sourceArgs, ...nodeArgs])) fail('Project validation failed.');
 if (!runNode(selfCheckScript, ['--project', project, '--preview', preview, ...nodeArgs])) {
   fail('Asset self-check is incomplete. Review the generated identity/contact artifacts before building.');
 }
@@ -82,8 +87,9 @@ fs.cpSync(project, stage, {
   filter: (source) => !['node_modules', 'dist'].includes(path.basename(source))
 });
 
-const electronExecutable = ensureElectronRuntime(stage);
-if (!runNode('--test', ['tests/behavior-engine.test.mjs', 'tests/config.test.mjs'], stage)) fail('Generated project tests failed.');
+const electronRuntime = ensureElectronRuntime(stage);
+const electronExecutable = electronRuntime.executable;
+if (!runNode('--test', ['tests/behavior-engine.test.mjs', 'tests/config.test.mjs', 'tests/security.test.mjs'], stage)) fail('Generated project tests failed.');
 fs.mkdirSync(preview, { recursive: true });
 
 if (!args['skip-smoke'] && (!fs.existsSync(runtime) || args['refresh-smoke'])) {
@@ -112,14 +118,17 @@ if (!args['skip-scenarios']) {
 if (!runNode(selfCheckScript, ['--project', project, '--preview', preview, '--runtime', runtime, ...nodeArgs])) {
   fail('Runtime review is incomplete. Inspect runtime-window.png and scenario captures, complete self-check-review.json, then rerun this command without --refresh-smoke.');
 }
+if (!runNode(privacyScript, ['--root', outputRoot, ...sourceArgs])) {
+  fail('Output privacy audit failed. Remove host paths, unlisted raster files, or copied source photos before packaging.');
+}
 
 if (args['verify-only']) {
   fs.rmSync(stage, { recursive: true, force: true });
-  console.log(JSON.stringify({ project, preview, verified: true, packaged: false, platform: `${process.platform}/${process.arch}` }, null, 2));
+  console.log(JSON.stringify({ project: 'project', preview: 'preview', verified: true, packaged: false, platform: `${process.platform}/${process.arch}` }, null, 2));
   process.exit(0);
 }
 
-if (!runNode(path.join(stage, 'tools', 'package-current.mjs'), [], stage, { PET_ELECTRON_DIST: path.dirname(electronExecutable) })) {
+if (!runNode(path.join(stage, 'tools', 'package-current.mjs'), [], stage, { PET_ELECTRON_DIST: electronRuntime.dist })) {
   fail('Current-platform packaging failed.');
 }
 const dist = path.join(stage, 'dist');
@@ -170,5 +179,28 @@ if (process.platform === 'win32') {
   }
 }
 
+if (copied.length !== 1) fail(`Expected exactly one packaged application, received ${copied.length}.`);
+const packagedArtifact = copied[0];
+const packagedExecutable = process.platform === 'win32'
+  ? path.join(packagedArtifact, `${safeName}.exe`)
+  : path.join(packagedArtifact, 'Contents', 'MacOS', safeName);
+if (!fs.existsSync(packagedExecutable)) fail(`Packaged executable is missing: ${portableRelative(outputRoot, packagedExecutable)}`);
+const packagedSmoke = path.join(preview, `${platformFolder}-packaged-smoke.png`);
+runElectron(packagedExecutable, packagedArtifact, {
+  PET_SMOKE_TEST: '1',
+  PET_SMOKE_OUT: packagedSmoke
+});
+if (!fs.existsSync(packagedSmoke)) fail(`Packaged smoke screenshot is missing: ${portableRelative(outputRoot, packagedSmoke)}`);
+if (!runNode(privacyScript, ['--root', outputRoot, ...sourceArgs])) {
+  fail('Post-package privacy audit failed. Remove host paths, unlisted raster files, copied source photos, or unsanitized error logs.');
+}
+
 fs.rmSync(stage, { recursive: true, force: true });
-console.log(JSON.stringify({ project, preview, release, artifacts: copied, platform: `${process.platform}/${process.arch}` }, null, 2));
+console.log(JSON.stringify({
+  project: 'project',
+  preview: 'preview',
+  release: portableRelative(outputRoot, release),
+  artifacts: copied.map((artifact) => portableRelative(outputRoot, artifact)),
+  packagedSmoke: portableRelative(outputRoot, packagedSmoke),
+  platform: `${process.platform}/${process.arch}`
+}, null, 2));

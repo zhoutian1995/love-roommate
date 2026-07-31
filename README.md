@@ -15,8 +15,9 @@
 ## 推荐环境
 
 - **推荐使用 Codex Desktop**：Skill 会复用 Codex 自带的 Node、pnpm、Python、Sharp 和图像生成能力，不需要用户自己搭一套开发环境。
-- **最终人物素材必须使用 GPT Image 2**：模型标识为 `gpt-image-2`。身份板、基础动作表和接力角色动作表都会记录模型来源；使用其他模型生成的最终素材会被校验器拦截。
-- 首次构建需要联网下载固定版本的 Electron 运行时。
+- **最终人物素材推荐并按流程要求使用 GPT Image 2**：身份板、基础动作表和接力角色动作表都会记录 `codex-imagegen / gpt-image-2 / workflow-attested` 声明和文件哈希。
+- 这份声明用于防止流程误操作，不是 OpenAI 平台签名，也不能抵抗恶意手工伪造。PNG 不会随身携带一张“我是哪个模型画的”公证书。
+- 首次构建需要联网下载固定版本的 Electron 41.0.2；脚本会校验官方压缩包哈希和运行时结构。
 
 ## 它能做什么
 
@@ -85,7 +86,7 @@ Skill 会按下面的流程推进：
 flowchart LR
     A["上传 1-8 人照片"] --> B["诊断与人物编号"]
     B --> C["认领自己或选择 none"]
-    C --> D["选择模式、领头人与顺序"]
+    C --> D["确认授权、选择模式与顺序"]
     D --> E["使用 GPT Image 2 生成素材"]
     E --> F["身份与动作首次确认"]
     F --> G["精灵处理与自动校验"]
@@ -96,15 +97,19 @@ flowchart LR
 关键规则：
 
 1. Skill 不会偷偷判断照片里哪一个是你，必须由你选择 `none` 或具体人物。
-2. `poop-relay` 和 `all` 必须分别指定领头人和有序跟随列表；“你本人”不会自动获得领头资格。
-3. 第一次确认检查脸、发型、衣服、编号和接力顺序；第二次确认检查动作、完整身体和透明边缘。
-4. 运行阶段会检查鼠标跟随、队形连接、接力推进以及“全程只有一坨”。这不是哲学原则，是自动化测试。
+2. 创建项目前必须明确确认照片中所有人已授权；系统只能记录你的声明，不能替你去宿舍挨个做法律尽调。
+3. `poop-relay` 和 `all` 必须分别指定领头人和有序跟随列表；“你本人”不会自动获得领头资格。
+4. 第一次确认检查脸、发型、衣服、编号和接力顺序；第二次确认检查动作、完整身体和透明边缘。
+5. 运行阶段会检查鼠标跟随、队形连接、接力推进以及“全程只有一坨”。这不是哲学原则，是自动化测试。
+6. 最终构建会直接启动复制后的 `.exe` 或 `.app` 做 packaged smoke，再对包含发布物的整个输出目录执行第二次隐私扫描。
 
 ## 隐私原则
 
 - 参考照片会发送给当前图像生成工具，用于生成用户自己的角色素材。
-- 原图不会复制进 `project/` 或 `release/`，项目只记录 SHA-256 指纹和文件大小。
+- 原图不会复制进 `project/` 或 `release/`，Manifest V2 也不持久化原图 SHA-256、大小、创建时间或本机绝对路径。
+- 当用户传入 `--source` 时，原图哈希只在内存中临时用于精确副本检查，不写入项目。
 - 用户生成的身份板、动作表、角色精灵和预览图保存在用户自己的输出目录，不进入本 Skill 仓库。
+- 项目中的位图实行严格白名单：只允许精灵清单引用的已处理图片，额外塞进去的“顺手备份一下原图”会被拒绝。
 - 发布审计会拦截仓库内的位图、`preview/`、`release/`、`dist/` 和 `node_modules/`。
 - 请只使用已获得许可的照片。技术上能生成，不等于社交上能活着回来。
 
@@ -134,7 +139,15 @@ flowchart LR
 
 ### 可以使用其他图像模型吗？
 
-可以拿来讨论提示词，但最终身份板、基础动作表和角色动作表必须由 GPT Image 2（`gpt-image-2`）生成。生成清单会记录文件指纹和模型来源，其他模型会被质量门禁拒绝。
+可以拿来讨论提示词，但本 Skill 的最终身份板、基础动作表和角色动作表按 GPT Image 2 工作流执行。生成清单记录固定策略和文件哈希，用来发现漏记录或文件被改动；它不是密码学模型证明，README 不在这里表演“看一眼 PNG 就知道祖宗十八代”。
+
+### 旧项目为什么突然不能构建？
+
+Manifest V1 可能保存原图指纹或本机路径，因此不会被静默放行。先运行 `migrate_project_manifest.mjs --dry-run` 查看变化，再用 `--apply --consent confirmed` 显式迁移。没有确认，就不替你半夜改户口本。
+
+### 网络受限时会自动切第三方镜像吗？
+
+不会。默认只使用官方 npm registry 和 Electron 官方发布源。第三方源必须同时显式设置镜像地址与 `CODEX_ALLOW_THIRD_PARTY_MIRROR=1`，并显示安全警告；“下载失败所以悄悄换源”已经退休。
 
 ### 为什么第一次自检会失败？
 
@@ -153,7 +166,9 @@ flowchart LR
 在仓库根目录运行：
 
 ```powershell
-node --test assets/electron-template/tests/behavior-engine.test.mjs assets/electron-template/tests/config.test.mjs
+node --test assets/electron-template/tests/behavior-engine.test.mjs assets/electron-template/tests/config.test.mjs assets/electron-template/tests/security.test.mjs
+node --test scripts/tests/security-hardening.test.mjs scripts/tests/runtime-security.test.mjs
+node scripts/release_check.mjs
 node scripts/audit_skill_release.mjs
 python "$HOME\.codex\skills\.system\skill-creator\scripts\quick_validate.py" .
 ```
@@ -171,4 +186,3 @@ python "$HOME\.codex\skills\.system\skill-creator\scripts\quick_validate.py" .
 本项目用于已获授权照片的创意桌宠制作与技术实验。使用者自行负责取得肖像与隐私许可，并对生成内容、传播范围和人际后果负责。
 
 作者提供代码、方法和校验工具，不提供友情修复、宿舍调解或保险理赔服务。
-

@@ -10,7 +10,7 @@ Run `scripts/self_check_project.mjs`. It writes these files under `preview/`:
 - `self-check-report.md`: short gate summary.
 - `self-check-review.json`: manual visual-review form. It is created once and never overwritten. Each character and runtime section contains an artifact fingerprint; copy the current fingerprint from the report after viewing changed assets so stale approvals cannot survive regeneration.
 
-The automated checks cover GPT Image 2 provenance and source fingerprints, placeholders, incomplete base or configured role-action groups, frames shared across people or actions, stale contact/runtime screenshots, empty or clipped frames, opaque edges, weak readable scale, centering and animation drift, nearly duplicate animation frames, chroma spill, incorrect centipede anchor direction, cross-character scale mismatch, and blank runtime screenshots.
+The automated checks cover the GPT Image 2 workflow attestation and generated-file hashes, placeholders, incomplete base or configured role-action groups, frames shared across people or actions, stale contact/runtime screenshots, empty or clipped frames, opaque edges, weak readable scale, centering and animation drift, nearly duplicate animation frames, chroma spill, incorrect centipede anchor direction, cross-character scale mismatch, and blank runtime screenshots. The attestation is not an OpenAI-signed model receipt.
 
 ## Visual pass
 

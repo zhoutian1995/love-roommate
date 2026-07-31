@@ -8,6 +8,7 @@ import {
   readJson,
   writeJson
 } from './lib/common.mjs';
+import { portableRelative } from './lib/privacy.mjs';
 import {
   alphaBounds,
   inferBorderKey,
@@ -18,7 +19,7 @@ import {
 const args = parseArgs(process.argv.slice(2));
 applyCodexRuntimeArgs(args);
 if (!args.project || !args.sheet || !args.character) {
-  fail('Usage: node process_sprites.mjs --project <project> --sheet <sheet.png> --character person-1 [--key auto|#ff00ff] [--size 112]');
+  fail('Usage: node process_sprites.mjs --project <project> --sheet <sheet.png> --character person-1 --pnpm <codex-pnpm> [--node-modules <codex-node-modules>] [--key auto|#ff00ff] [--size 112]');
 }
 
 const project = path.resolve(args.project);
@@ -26,6 +27,14 @@ const sheet = path.resolve(args.sheet);
 const characterId = args.character;
 if (!fs.existsSync(path.join(project, 'package.json'))) fail(`Not a generated project: ${project}`);
 if (!fs.existsSync(sheet)) fail(`Action sheet does not exist: ${sheet}`);
+const outputRoot = path.dirname(project);
+let sheetRelative;
+try {
+  sheetRelative = portableRelative(outputRoot, sheet, 'Action sheet');
+} catch (error) {
+  fail(error.message);
+}
+if (!sheetRelative.startsWith('preview/')) fail('Action sheet must be stored under the project preview directory.');
 
 const configPath = path.join(project, 'src', 'config', 'pet.config.json');
 const manifestPath = path.join(project, 'src', 'assets', 'sprites', 'manifest.json');
@@ -141,6 +150,6 @@ manifestEntry.anchors = {
 };
 manifest.spriteSize = spriteSize;
 writeJson(manifestPath, manifest);
-writeJson(path.join(outputDir, 'processing-report.json'), { characterId, sheet, spriteSize, cells: report });
+writeJson(path.join(outputDir, 'processing-report.json'), { characterId, sheet: sheetRelative, spriteSize, cells: report });
 
 console.log(`Processed ${characterId}: ${outputDir}`);

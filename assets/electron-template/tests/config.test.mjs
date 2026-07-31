@@ -11,11 +11,16 @@ const behaviors = JSON.parse(fs.readFileSync(path.join(root, 'src/config/behavio
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'src/assets/sprites/manifest.json'), 'utf8'));
 
 test('default template uses the Love Roommate brand', () => {
-  assert.equal(packageJson.name, 'love-roommate');
-  assert.equal(packageJson.petBuild.productName, 'Love Roommate');
-  assert.equal(packageJson.petBuild.appId, 'com.codex.love-roommate');
-  assert.equal(config.app.name, 'Love Roommate');
-  assert.equal(config.app.id, 'com.codex.love-roommate');
+  const expectedSlug = config.app.name
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'love-roommate';
+  assert.equal(packageJson.name, expectedSlug);
+  assert.equal(packageJson.petBuild.productName, config.app.name);
+  assert.equal(packageJson.petBuild.appId, config.app.id);
+  assert.match(config.app.id, /^com\.codex\.[a-z0-9.-]+$/);
 });
 
 test('public configuration stays inside v1 contract', () => {

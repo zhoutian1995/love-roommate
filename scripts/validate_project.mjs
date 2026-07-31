@@ -3,10 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { applyCodexRuntimeArgs, fail, loadSharp, parseArgs, readJson } from './lib/common.mjs';
 import { alphaBounds } from './lib/sprite-processing.mjs';
+import { auditTextFilesForSensitivePaths, isRasterFile, portableRelative } from './lib/privacy.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 applyCodexRuntimeArgs(args);
-if (!args.project) fail('Usage: node validate_project.mjs --project <project> [--source <original-photo>]');
+if (!args.project) fail('Usage: node validate_project.mjs --project <project> --pnpm <codex-pnpm> [--node-modules <codex-node-modules>] [--source <original-photo>]');
 const project = path.resolve(args.project);
 const projectManifestPath = path.join(path.dirname(project), 'project-manifest.json');
 const configPath = path.join(project, 'src', 'config', 'pet.config.json');
@@ -20,6 +21,21 @@ const config = readJson(configPath);
 const behaviors = readJson(behaviorsPath);
 const manifest = readJson(manifestPath);
 const errors = [];
+let projectManifest = null;
+if (!fs.existsSync(projectManifestPath)) errors.push('project-manifest.json is required.');
+else {
+  projectManifest = readJson(projectManifestPath);
+  if (projectManifest.schemaVersion !== 2) errors.push('project-manifest.json must use schemaVersion 2. Run migrate_project_manifest.mjs before validation or building.');
+  if (projectManifest.consent?.allSubjectsAuthorized !== true) errors.push('The project is missing the required all-subjects authorization attestation.');
+  for (const [key, expected] of Object.entries({ project: 'project', release: 'release', preview: 'preview' })) {
+    if (projectManifest.paths?.[key] !== expected) errors.push(`project-manifest paths.${key} must be ${expected}.`);
+  }
+  if (projectManifest.sourcePhoto || projectManifest.createdAt || projectManifest.project || projectManifest.release || projectManifest.preview) {
+    errors.push('project-manifest.json contains deprecated source fingerprints, timestamps, or absolute path fields. Run the V2 migration.');
+  }
+  const allowedKeys = new Set(['schemaVersion', 'name', 'people', 'paths', 'selection', 'consent']);
+  for (const key of Object.keys(projectManifest)) if (!allowedKeys.has(key)) errors.push(`project-manifest.json contains unsupported field: ${key}.`);
+}
 if (config.schemaVersion !== 1 || behaviors.schemaVersion !== 1 || manifest.schemaVersion !== 1) errors.push('All schemaVersion values must be 1.');
 if (!Array.isArray(config.characters) || config.characters.length < 1 || config.characters.length > 8) errors.push('pet.config.json must contain 1-8 characters.');
 const ids = config.characters.map((character) => character.id);
@@ -60,6 +76,16 @@ if (poopChase.enabled) {
 }
 if ((selection.mode === 'poop-relay' || selection.mode === 'all') !== Boolean(poopChase.enabled)) errors.push('selection.mode and poopChase.enabled disagree.');
 if ((selection.mode === 'centipede' || selection.mode === 'all') !== Boolean(behaviors.centipede?.enabled)) errors.push('selection.mode and centipede.enabled disagree.');
+if (projectManifest) {
+  if (projectManifest.name !== config.app?.name) errors.push('project-manifest name must match pet.config.json app.name.');
+  if (projectManifest.people !== config.characters.length) errors.push('project-manifest people must match the configured character count.');
+  const declared = projectManifest.selection || {};
+  if (declared.mode !== selection.mode || (declared.userCharacterId ?? null) !== (selection.userCharacterId ?? null)) {
+    errors.push('project-manifest selection must match pet.config.json.');
+  }
+  if ((declared.leaderId ?? null) !== (poopChase.enabled ? poopLeader : null)) errors.push('project-manifest leaderId must match behaviors.json.');
+  if (JSON.stringify(declared.followerIds || []) !== JSON.stringify(poopChase.enabled ? poopFollowers : [])) errors.push('project-manifest followerIds must match behaviors.json in order.');
+}
 
 const sharp = loadSharp(project);
 sharp.cache(false);
@@ -122,23 +148,12 @@ for (const relative of uniqueFiles) {
   }
 }
 
-let sourceHash = null;
-let sourceSize = null;
 if (args.source) {
   const source = path.resolve(args.source);
   if (!fs.existsSync(source)) errors.push(`Source photo does not exist: ${source}`);
   else {
-    sourceHash = crypto.createHash('sha256').update(fs.readFileSync(source)).digest('hex');
-    sourceSize = fs.statSync(source).size;
-  }
-} else if (fs.existsSync(projectManifestPath)) {
-  const projectManifest = readJson(projectManifestPath);
-  sourceHash = projectManifest.sourcePhoto?.sha256 || null;
-  sourceSize = projectManifest.sourcePhoto?.size || null;
-}
-if (!sourceHash || !Number.isInteger(sourceSize) || sourceSize < 1) {
-  errors.push('Missing original-photo fingerprint. Recreate the project with --source so privacy validation cannot be bypassed.');
-} else {
+    const sourceHash = crypto.createHash('sha256').update(fs.readFileSync(source)).digest('hex');
+    const sourceSize = fs.statSync(source).size;
     const stack = [project];
     while (stack.length) {
       const current = stack.pop();
@@ -148,10 +163,28 @@ if (!sourceHash || !Number.isInteger(sourceSize) || sourceSize < 1) {
         if (entry.isDirectory()) stack.push(full);
         else if (entry.isFile() && fs.statSync(full).size === sourceSize) {
           const hash = crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex');
-          if (hash === sourceHash) errors.push(`Original source photo was copied into the project: ${full}`);
+          if (hash === sourceHash) errors.push(`Original source photo was copied into the project: ${portableRelative(path.dirname(project), full)}`);
         }
       }
     }
+  }
+}
+
+const allowedRaster = new Set([...uniqueFiles].map((relative) => path.resolve(spriteRoot, relative)));
+const projectStack = [project];
+while (projectStack.length) {
+  const current = projectStack.pop();
+  for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+    if (['node_modules', 'dist'].includes(entry.name)) continue;
+    const full = path.join(current, entry.name);
+    if (entry.isDirectory()) projectStack.push(full);
+    else if (entry.isFile() && isRasterFile(full) && !allowedRaster.has(path.resolve(full))) {
+      errors.push(`Unexpected raster file in project: ${portableRelative(path.dirname(project), full)}`);
+    }
+  }
+}
+for (const issue of auditTextFilesForSensitivePaths(path.dirname(project))) {
+  errors.push(`${issue.file} contains an absolute/private path.`);
 }
 
 if (errors.length) {

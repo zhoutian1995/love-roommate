@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { applyCodexRuntimeArgs, fail, loadSharp, parseArgs, readJson, writeJson } from './lib/common.mjs';
 import { alphaBounds } from './lib/sprite-processing.mjs';
+import { portableRelative, sanitizePersistedValue } from './lib/privacy.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 applyCodexRuntimeArgs(args);
@@ -12,6 +13,18 @@ if (!args.project) {
 
 const project = path.resolve(args.project);
 const preview = path.resolve(args.preview || path.join(path.dirname(project), 'preview'));
+const outputRoot = path.dirname(project);
+let projectRelative;
+let previewRelative;
+try {
+  projectRelative = portableRelative(outputRoot, project, 'Project');
+  previewRelative = portableRelative(outputRoot, preview, 'Preview');
+} catch (error) {
+  fail(error.message);
+}
+if (projectRelative !== 'project' || previewRelative !== 'preview') {
+  fail('Self-check requires the standard output layout with project/ and preview/ under one output root.');
+}
 const configPath = path.join(project, 'src', 'config', 'pet.config.json');
 const behaviorsPath = path.join(project, 'src', 'config', 'behaviors.json');
 const manifestPath = path.join(project, 'src', 'assets', 'sprites', 'manifest.json');
@@ -38,6 +51,14 @@ const runtimePath = args.runtime
     ? path.join(preview, 'runtime-window.png')
     : null;
 const reviewPath = args.review ? path.resolve(args.review) : defaultReviewPath;
+let runtimeRelative = null;
+let reviewRelative;
+try {
+  runtimeRelative = runtimePath ? portableRelative(outputRoot, runtimePath, 'Runtime screenshot') : null;
+  reviewRelative = portableRelative(outputRoot, reviewPath, 'Manual review');
+} catch (error) {
+  fail(error.message);
+}
 const spriteRoot = path.join(project, 'src', 'assets', 'sprites');
 const issues = [];
 const frameMetrics = [];
@@ -86,8 +107,15 @@ function combinedHash(values) {
 function validateGenerationManifest() {
   if (!fs.existsSync(generationManifestPath)) return null;
   const data = readJson(generationManifestPath);
-  if (data.schemaVersion !== 1 || data.requiredModel !== 'gpt-image-2' || !Array.isArray(data.assets)) {
-    addIssue('error', 'generation-manifest-schema', 'The generation manifest is invalid or does not require gpt-image-2.', 'Regenerate the manifest and record only GPT Image 2 final artwork.', {}, 25);
+  const policy = data.provenancePolicy || {};
+  if (
+    data.schemaVersion !== 2 ||
+    policy.generator !== 'codex-imagegen' ||
+    policy.declaredModelPolicy !== 'gpt-image-2' ||
+    policy.evidenceLevel !== 'workflow-attested' ||
+    !Array.isArray(data.assets)
+  ) {
+    addIssue('error', 'generation-manifest-schema', 'The generation manifest does not satisfy the GPT Image 2 workflow-attestation policy.', 'Regenerate the manifest and record the final artwork with record_image_generation.mjs.', {}, 25);
     return data;
   }
   const required = [{ kind: 'identity', characterId: null, role: null }];
@@ -104,22 +132,33 @@ function validateGenerationManifest() {
     );
     const label = [expected.kind, expected.characterId, expected.role].filter(Boolean).join(':');
     if (!entry) {
-      addIssue('error', 'missing-gpt-image-2-provenance', `Missing GPT Image 2 generation record for ${label}.`, 'Generate the final artwork with GPT Image 2 and record it with record_image_generation.mjs.', { asset: label }, 20);
+      addIssue('error', 'missing-image-generation-attestation', `Missing GPT Image 2 workflow record for ${label}.`, 'Generate the final artwork with Codex image generation and record it with record_image_generation.mjs.', { asset: label }, 20);
       continue;
     }
-    if (entry.model !== 'gpt-image-2') {
-      addIssue('error', 'wrong-generation-model', `${label} was recorded with ${entry.model || 'an unknown model'}, not gpt-image-2.`, 'Regenerate this artwork with GPT Image 2.', { asset: label, model: entry.model }, 25);
+    if (
+      entry.generator !== 'codex-imagegen' ||
+      entry.declaredModelPolicy !== 'gpt-image-2' ||
+      entry.evidenceLevel !== 'workflow-attested'
+    ) {
+      addIssue('error', 'invalid-image-generation-attestation', `${label} has an incomplete workflow attestation.`, 'Record the current Codex image-generation output again.', { asset: label }, 25);
       continue;
     }
-    const file = path.resolve(preview, entry.file || '');
-    const safe = file.startsWith(`${preview}${path.sep}`);
-    if (!safe || !fs.existsSync(file)) {
-      addIssue('error', 'missing-generation-source', `Recorded GPT Image 2 source is missing or unsafe for ${label}.`, 'Restore the recorded source inside preview and record it again.', { asset: label, file }, 20);
+    let file;
+    try {
+      file = path.resolve(outputRoot, entry.file || '');
+      const relative = portableRelative(outputRoot, file, 'Generation source');
+      if (!relative.startsWith('preview/')) throw new Error('Generation source must remain inside preview/.');
+    } catch {
+      addIssue('error', 'missing-generation-source', `The recorded generation source path is unsafe for ${label}.`, 'Store the generated source inside preview and record it again.', { asset: label, file: entry.file || null }, 20);
+      continue;
+    }
+    if (!fs.existsSync(file)) {
+      addIssue('error', 'missing-generation-source', `The recorded generation source is missing for ${label}.`, 'Restore the recorded source inside preview and record it again.', { asset: label, file: entry.file }, 20);
       continue;
     }
     const currentHash = fileHash(file);
     if (currentHash !== entry.sha256) {
-      addIssue('error', 'stale-generation-provenance', `Recorded GPT Image 2 source changed after approval for ${label}.`, 'Record the current GPT Image 2 output again before processing and review.', { asset: label, file }, 20);
+      addIssue('error', 'stale-generation-attestation', `The recorded source changed after its workflow attestation for ${label}.`, 'Record the current image-generation output again before processing and review.', { asset: label, file: entry.file }, 20);
     }
   }
   return data;
@@ -527,7 +566,7 @@ if (config.characters.length > 1) {
 let runtimeMetrics = null;
 if (runtimePath) {
   if (!fs.existsSync(runtimePath)) {
-    addIssue('error', 'missing-runtime', `Runtime screenshot does not exist: ${runtimePath}`, 'Run the smoke capture again before delivery.', {}, 25);
+    addIssue('error', 'missing-runtime', `Runtime screenshot does not exist: ${runtimeRelative}`, 'Run the smoke capture again before delivery.', {}, 25);
   } else {
     try {
       if (fs.statSync(runtimePath).mtimeMs < newestSpriteTime) {
@@ -542,7 +581,7 @@ if (runtimePath) {
         channelMax = Math.max(channelMax, raw.data[offset], raw.data[offset + 1], raw.data[offset + 2]);
       }
       runtimeMetrics = {
-        path: runtimePath,
+        path: runtimeRelative,
         dimensions: [raw.info.width, raw.info.height],
         visibleCoverage: round(bounds?.coverage || 0),
         colorRange: channelMax - channelMin
@@ -581,12 +620,13 @@ if (hasErrors || manual.failed) status = 'fail';
 else if (manual.complete && overallScore >= minScore) status = 'pass';
 else if (manual.complete) status = 'warn';
 
-const recommendedActions = [...new Set(issues.map((issue) => issue.recommendation).filter(Boolean))];
+const persistedIssues = sanitizePersistedValue(issues, outputRoot);
+const recommendedActions = [...new Set(persistedIssues.map((issue) => issue.recommendation).filter(Boolean))];
 const report = {
   schemaVersion: 1,
   generatedAt: new Date().toISOString(),
-  project,
-  preview,
+  project: projectRelative,
+  preview: previewRelative,
   status,
   overallScore,
   minScore,
@@ -597,28 +637,28 @@ const report = {
     issues: issues.length
   },
   manualReview: {
-    path: reviewPath,
+    path: reviewRelative,
     provided: manual.provided,
     complete: manual.complete,
     pending: manual.pending,
     failed: manual.failed
   },
   artifacts: {
-    identityBoard: { path: identityBoardPath, fingerprint: identityFingerprint },
-    actionContactSheet: { path: contactSheetPath, fingerprint: contactSheetFingerprint },
+    identityBoard: { path: portableRelative(outputRoot, identityBoardPath), fingerprint: identityFingerprint },
+    actionContactSheet: { path: portableRelative(outputRoot, contactSheetPath), fingerprint: contactSheetFingerprint },
     characters: characterFingerprints,
-    runtimeWindow: runtimePath ? { path: runtimePath, fingerprint: runtimeFingerprint } : null
-    ,generationManifest: generationManifest ? { path: generationManifestPath, fingerprint: fileHash(generationManifestPath) } : null
+    runtimeWindow: runtimePath ? { path: runtimeRelative, fingerprint: runtimeFingerprint } : null,
+    generationManifest: generationManifest ? { path: portableRelative(outputRoot, generationManifestPath), fingerprint: fileHash(generationManifestPath) } : null
   },
-  issues,
+  issues: persistedIssues,
   recommendedActions,
   frameMetrics,
   runtimeMetrics
 };
-writeJson(reportPath, report);
+writeJson(reportPath, sanitizePersistedValue(report, outputRoot));
 
-const issueLines = issues.length
-  ? issues.map((issue) => `- [${issue.severity.toUpperCase()}] ${issue.message} Action: ${issue.recommendation}`)
+const issueLines = persistedIssues.length
+  ? persistedIssues.map((issue) => `- [${issue.severity.toUpperCase()}] ${issue.message} Action: ${issue.recommendation}`)
   : ['- No automated issues found.'];
 const pendingLines = manual.pending.length ? manual.pending.map((item) => `- ${item}`) : ['- None.'];
 const markdown = [
@@ -642,10 +682,17 @@ const markdown = [
   status === 'pass'
     ? '- Passed. Continue to the next approval or delivery step.'
     : status === 'needs-review'
-      ? `- Inspect the identity board, contact sheet${runtimePath ? ', and runtime screenshot' : ''}; fill ${reviewPath}; then rerun this command.`
+      ? `- Inspect the identity board, contact sheet${runtimePath ? ', and runtime screenshot' : ''}; fill ${reviewRelative}; then rerun this command.`
       : '- Blocked. Apply the recommended actions and rerun the complete self-check.'
 ].join('\n');
 fs.writeFileSync(markdownPath, `${markdown}\n`, 'utf8');
 
-console.log(JSON.stringify({ status, overallScore, minScore, report: reportPath, review: reviewPath, markdown: markdownPath }, null, 2));
+console.log(JSON.stringify({
+  status,
+  overallScore,
+  minScore,
+  report: portableRelative(outputRoot, reportPath),
+  review: portableRelative(outputRoot, reviewPath),
+  markdown: portableRelative(outputRoot, markdownPath)
+}, null, 2));
 if (!args['warn-only'] && (status !== 'pass' || !manual.complete)) process.exit(1);

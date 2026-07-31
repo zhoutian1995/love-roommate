@@ -5,35 +5,19 @@ import { fileURLToPath } from 'node:url';
 import { fail, parseArgs, readJson, slugify, writeJson } from './lib/common.mjs';
 
 const args = parseArgs(process.argv.slice(2));
-if (!args.name || !args.out || !args.people || !args.source || !args.mode || !args.self) {
-  fail('Usage: node create_project.mjs --name "App Name" --out <output-root> --source <photo> --people <1-8> --mode <normal|centipede|poop-relay|all> --self <none|person-N> [--names "A,B"] [--leader person-N --followers "person-N,person-N"]');
+if (!args.name || !args.out || !args.people || !args.source || !args.mode || !args.self || !args.consent) {
+  fail('Usage: node create_project.mjs --name "App Name" --out <output-root> --source <photo> --people <1-8> --mode <normal|centipede|poop-relay|all> --self <none|person-N> --consent confirmed [--names "A,B"] [--leader person-N --followers "person-N,person-N"]');
 }
 
+const appName = String(args.name).trim();
+if (!appName) fail('--name must contain a visible application name.');
+if (args.consent !== 'confirmed') fail('--consent confirmed is required to attest that every depicted person authorized this use.');
 const people = Number.parseInt(args.people, 10);
 if (!Number.isInteger(people) || people < 1 || people > 8) fail('--people must be an integer from 1 to 8.');
 const source = path.resolve(args.source);
 if (!fs.existsSync(source) || !fs.statSync(source).isFile()) fail(`Source photo does not exist: ${source}`);
 const mode = String(args.mode);
 if (!['normal', 'centipede', 'poop-relay', 'all'].includes(mode)) fail('--mode must be normal, centipede, poop-relay, or all.');
-
-const outputRoot = path.resolve(args.out);
-if (fs.existsSync(outputRoot)) fail(`Refusing to overwrite existing output: ${outputRoot}`);
-
-const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const template = path.join(skillRoot, 'assets', 'electron-template');
-const project = path.join(outputRoot, 'project');
-const release = path.join(outputRoot, 'release');
-const preview = path.join(outputRoot, 'preview');
-
-fs.mkdirSync(outputRoot, { recursive: false });
-fs.cpSync(template, project, { recursive: true, errorOnExist: true });
-fs.mkdirSync(release, { recursive: true });
-fs.mkdirSync(path.join(preview, 'sources'), { recursive: true });
-writeJson(path.join(preview, 'generation-manifest.json'), {
-  schemaVersion: 1,
-  requiredModel: 'gpt-image-2',
-  assets: []
-});
 
 const names = String(args.names || '')
   .split(',')
@@ -63,58 +47,90 @@ if (poopRelayEnabled) {
   for (const id of poopFollowers) if (!ids.includes(id)) fail(`Unknown poop-relay follower: ${id}`);
 }
 
-const slug = slugify(args.name);
+const outputRoot = path.resolve(args.out);
+if (fs.existsSync(outputRoot)) fail(`Refusing to overwrite existing output: ${outputRoot}`);
+const outputParent = path.dirname(outputRoot);
+if (!fs.existsSync(outputParent) || !fs.statSync(outputParent).isDirectory()) fail(`Output parent does not exist: ${outputParent}`);
+
+const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const template = path.join(skillRoot, 'assets', 'electron-template');
+const temporaryRoot = path.join(outputParent, `.${path.basename(outputRoot)}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+const project = path.join(temporaryRoot, 'project');
+const release = path.join(temporaryRoot, 'release');
+const preview = path.join(temporaryRoot, 'preview');
+const slug = slugify(appName);
 const appId = `com.codex.${slug.replaceAll('-', '.')}`;
-const configPath = path.join(project, 'src', 'config', 'pet.config.json');
-const config = readJson(configPath);
-config.app = { name: args.name, id: appId, version: '1.0.0' };
-config.characters = characters;
-config.selection = { mode, userCharacterId };
-writeJson(configPath, config);
 
-const behaviorsPath = path.join(project, 'src', 'config', 'behaviors.json');
-const behaviors = readJson(behaviorsPath);
-behaviors.centipede.enabled = mode === 'centipede' || mode === 'all';
-behaviors.poopChase.enabled = poopRelayEnabled;
-behaviors.poopChase.leaderId = poopLeader || characters[0].id;
-behaviors.poopChase.followerIds = poopRelayEnabled ? poopFollowers : [];
-writeJson(behaviorsPath, behaviors);
+try {
+  fs.mkdirSync(temporaryRoot, { recursive: false });
+  fs.cpSync(template, project, { recursive: true, errorOnExist: true });
+  fs.mkdirSync(release, { recursive: true });
+  fs.mkdirSync(path.join(preview, 'sources'), { recursive: true });
+  writeJson(path.join(preview, 'generation-manifest.json'), {
+    schemaVersion: 2,
+    provenancePolicy: {
+      generator: 'codex-imagegen',
+      declaredModelPolicy: 'gpt-image-2',
+      evidenceLevel: 'workflow-attested'
+    },
+    assets: []
+  });
 
-const manifestPath = path.join(project, 'src', 'assets', 'sprites', 'manifest.json');
-const manifest = readJson(manifestPath);
-const placeholder = manifest.characters[0];
-manifest.characters = characters.map((character) => ({
-  id: character.id,
-  frames: structuredClone(placeholder.frames),
-  anchors: structuredClone(placeholder.anchors)
-}));
-writeJson(manifestPath, manifest);
+  const configPath = path.join(project, 'src', 'config', 'pet.config.json');
+  const config = readJson(configPath);
+  config.app = { name: appName, id: appId, version: '1.0.0' };
+  config.characters = characters;
+  config.selection = { mode, userCharacterId };
+  writeJson(configPath, config);
 
-const packagePath = path.join(project, 'package.json');
-const packageJson = readJson(packagePath);
-packageJson.name = slug;
-packageJson.description = `${args.name} desktop pet`;
-packageJson.petBuild = { appId, productName: args.name };
-writeJson(packagePath, packageJson);
+  const behaviorsPath = path.join(project, 'src', 'config', 'behaviors.json');
+  const behaviors = readJson(behaviorsPath);
+  behaviors.centipede.enabled = mode === 'centipede' || mode === 'all';
+  behaviors.poopChase.enabled = poopRelayEnabled;
+  behaviors.poopChase.leaderId = poopLeader || characters[0].id;
+  behaviors.poopChase.followerIds = poopRelayEnabled ? poopFollowers : [];
+  writeJson(behaviorsPath, behaviors);
 
-writeJson(path.join(outputRoot, 'project-manifest.json'), {
-  schemaVersion: 1,
-  name: args.name,
-  people,
-  project,
-  release,
-  preview,
-  selection: {
-    mode,
-    userCharacterId,
-    leaderId: poopRelayEnabled ? poopLeader : null,
-    followerIds: poopRelayEnabled ? poopFollowers : []
-  },
-  sourcePhoto: {
-    sha256: crypto.createHash('sha256').update(fs.readFileSync(source)).digest('hex'),
-    size: fs.statSync(source).size
-  },
-  createdAt: new Date().toISOString()
-});
+  const manifestPath = path.join(project, 'src', 'assets', 'sprites', 'manifest.json');
+  const manifest = readJson(manifestPath);
+  const placeholder = manifest.characters[0];
+  manifest.characters = characters.map((character) => ({
+    id: character.id,
+    frames: structuredClone(placeholder.frames),
+    anchors: structuredClone(placeholder.anchors)
+  }));
+  writeJson(manifestPath, manifest);
 
-console.log(JSON.stringify({ outputRoot, project, release, preview, people }, null, 2));
+  const packagePath = path.join(project, 'package.json');
+  const packageJson = readJson(packagePath);
+  packageJson.name = slug;
+  packageJson.description = `${appName} desktop pet`;
+  packageJson.petBuild = { appId, productName: appName };
+  writeJson(packagePath, packageJson);
+
+  writeJson(path.join(temporaryRoot, 'project-manifest.json'), {
+    schemaVersion: 2,
+    name: appName,
+    people,
+    paths: { project: 'project', release: 'release', preview: 'preview' },
+    selection: {
+      mode,
+      userCharacterId,
+      leaderId: poopRelayEnabled ? poopLeader : null,
+      followerIds: poopRelayEnabled ? poopFollowers : []
+    },
+    consent: { allSubjectsAuthorized: true }
+  });
+  fs.renameSync(temporaryRoot, outputRoot);
+} catch (error) {
+  fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  fail(`Project creation failed without leaving a partial output: ${error.message}`);
+}
+
+console.log(JSON.stringify({
+  outputRoot,
+  project: path.join(outputRoot, 'project'),
+  release: path.join(outputRoot, 'release'),
+  preview: path.join(outputRoot, 'preview'),
+  people
+}, null, 2));
