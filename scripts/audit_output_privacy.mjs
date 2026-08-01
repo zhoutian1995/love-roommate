@@ -12,6 +12,57 @@ const project = path.join(root, 'project');
 const projectManifestPath = path.join(root, 'project-manifest.json');
 const spriteManifestPath = path.join(project, 'src', 'assets', 'sprites', 'manifest.json');
 const errors = [];
+
+function staysInside(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function findOriginalCopies(source) {
+  const sourceStats = fs.statSync(source);
+  const sourceHash = crypto.createHash('sha256').update(fs.readFileSync(source)).digest('hex');
+  const realRoot = fs.realpathSync(root);
+  const visitedDirectories = new Set();
+  const stack = ['project', 'release', 'preview']
+    .map((relative) => path.join(root, relative))
+    .filter((directory) => fs.existsSync(directory))
+    .map((directory) => ({ logical: directory, target: directory }));
+
+  while (stack.length) {
+    const current = stack.pop();
+    const logicalRelative = portableRelative(root, current.logical);
+    let realTarget;
+    let stats;
+    try {
+      realTarget = fs.realpathSync(current.target);
+      stats = fs.statSync(realTarget);
+    } catch {
+      errors.push(`Unable to inspect output path: ${logicalRelative}`);
+      continue;
+    }
+
+    if (stats.isDirectory()) {
+      if (!staysInside(realRoot, realTarget)) {
+        errors.push(`Output directory symlink points outside the output root: ${logicalRelative}`);
+        continue;
+      }
+      if (visitedDirectories.has(realTarget)) continue;
+      visitedDirectories.add(realTarget);
+      for (const entry of fs.readdirSync(realTarget, { withFileTypes: true })) {
+        stack.push({
+          logical: path.join(current.logical, entry.name),
+          target: path.join(realTarget, entry.name)
+        });
+      }
+      continue;
+    }
+
+    if (!stats.isFile() || stats.size !== sourceStats.size || !isRasterFile(realTarget)) continue;
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(realTarget)).digest('hex');
+    if (hash === sourceHash) errors.push(`Original source photo was copied into output: ${logicalRelative}`);
+  }
+}
+
 if (!fs.existsSync(projectManifestPath)) errors.push('project-manifest.json is missing.');
 if (!fs.existsSync(spriteManifestPath)) errors.push('Sprite manifest is missing.');
 
@@ -58,23 +109,7 @@ for (const issue of auditTextFilesForSensitivePaths(root)) {
 if (args.source) {
   const source = path.resolve(args.source);
   if (!fs.existsSync(source) || !fs.statSync(source).isFile()) errors.push(`Source photo does not exist: ${source}`);
-  else if (fs.existsSync(project)) {
-    const sourceSize = fs.statSync(source).size;
-    const sourceHash = crypto.createHash('sha256').update(fs.readFileSync(source)).digest('hex');
-    const stack = [project];
-    while (stack.length) {
-      const current = stack.pop();
-      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-        if (['node_modules', 'dist'].includes(entry.name)) continue;
-        const full = path.join(current, entry.name);
-        if (entry.isDirectory()) stack.push(full);
-        else if (entry.isFile() && fs.statSync(full).size === sourceSize) {
-          const hash = crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex');
-          if (hash === sourceHash) errors.push(`Original source photo was copied into project: ${portableRelative(root, full)}`);
-        }
-      }
-    }
-  }
+  else if (fs.existsSync(root) && fs.statSync(root).isDirectory()) findOriginalCopies(source);
 }
 
 if (errors.length) {

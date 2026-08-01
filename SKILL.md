@@ -28,7 +28,7 @@ Treat this Skill as a method, mode library, and validation harness. Never bundle
 ## Privacy And Supply Chain
 
 - Keep only relative paths in persisted JSON/Markdown. Never persist the original photo hash, size, creation time, username, or host path.
-- When `--source` is available, use it only for an in-memory exact-copy scan. Never copy the source into `project/` or `release/`.
+- When `--source` is available, use it only for an in-memory exact-copy scan. Audit the entire output root before release; `project/`, `release/`, and `preview/` must not contain the source, including through symlinks.
 - Allow only sprite-manifest-listed raster files inside `project/`. Run `audit_output_privacy.mjs` before packaging.
 - Prefer Codex-bundled Sharp. If it cannot load, use the locked Sharp runtime from the approved npm registry automatically.
 - Use frozen pnpm lockfiles. Never retry through a third-party registry or Electron mirror unless both the mirror address and `CODEX_ALLOW_THIRD_PARTY_MIRROR=1` are explicit.

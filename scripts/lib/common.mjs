@@ -65,6 +65,53 @@ function normalizedUrl(value) {
   return String(value || '').replace(/\/+$/, '').toLowerCase();
 }
 
+function resolveWindowsCommand(command) {
+  if (path.isAbsolute(command) || command.includes('/') || command.includes('\\')) {
+    return path.resolve(command);
+  }
+  const result = spawnSync('where.exe', [command], { encoding: 'utf8', shell: false });
+  if (result.status !== 0) return command;
+  return result.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || command;
+}
+
+export function resolvePnpmInvocation(command) {
+  if (process.platform !== 'win32' || !command.toLowerCase().endsWith('.cmd')) {
+    return { command, prefixArgs: [] };
+  }
+
+  const resolvedCommand = resolveWindowsCommand(command);
+  const commandDirectory = path.dirname(resolvedCommand);
+  const candidates = [];
+  let nodeCommand = process.execPath;
+  try {
+    const launcher = fs.readFileSync(resolvedCommand, 'utf8');
+    const nodeMatch = launcher.match(/%~dp0([^"\r\n]*?node\.exe)/i);
+    if (nodeMatch) {
+      const bundledNode = path.resolve(commandDirectory, nodeMatch[1].replaceAll('\\', path.sep));
+      if (fs.existsSync(bundledNode) && fs.statSync(bundledNode).isFile()) nodeCommand = bundledNode;
+    }
+    for (const match of launcher.matchAll(/%~dp0([^"\r\n]*?pnpm\.(?:cjs|mjs))/gi)) {
+      candidates.push(path.resolve(commandDirectory, match[1].replaceAll('\\', path.sep)));
+    }
+  } catch {
+    // Fall through to known pnpm layouts and then cmd.exe.
+  }
+  candidates.push(
+    path.join(commandDirectory, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs'),
+    path.join(commandDirectory, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs'),
+    path.resolve(commandDirectory, '..', '..', 'node', 'node_modules', 'pnpm', 'bin', 'pnpm.mjs'),
+    path.resolve(path.dirname(process.execPath), '..', 'node_modules', 'pnpm', 'bin', 'pnpm.mjs'),
+    path.resolve(path.dirname(process.execPath), '..', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
+  );
+  const script = candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+  if (script) return { command: nodeCommand, prefixArgs: [script] };
+
+  return {
+    command: process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe',
+    prefixArgs: ['/d', '/s', '/c', resolvedCommand]
+  };
+}
+
 export function approvedInstallEnvironment(includeElectronMirror = false, environment = process.env) {
   const registry = environment.CODEX_NPM_REGISTRY || OFFICIAL_NPM_REGISTRY;
   const mirror = includeElectronMirror && environment.ELECTRON_MIRROR
@@ -103,10 +150,9 @@ function installPinnedRuntime(kind, destination) {
     fs.copyFileSync(path.join(lockRoot, file), path.join(partial, file));
   }
   const installConfig = approvedInstallEnvironment(kind === 'electron');
-  const result = spawnSync(manager.command, [...manager.installArgs, '--registry', installConfig.registry], {
+  const result = spawnPnpm([...manager.installArgs, '--registry', installConfig.registry], {
     cwd: partial,
     stdio: 'inherit',
-    shell: process.platform === 'win32' && manager.command.toLowerCase().endsWith('.cmd'),
     env: { ...installConfig.env, [pathKey]: runtimePath }
   });
   if (result.status !== 0) {
@@ -328,12 +374,20 @@ export function packageManager() {
   };
 }
 
+export function spawnPnpm(args, options = {}) {
+  const manager = packageManager();
+  const invocation = resolvePnpmInvocation(manager.command);
+  return spawnSync(invocation.command, [...invocation.prefixArgs, ...manager.runArgs(args)], {
+    ...options,
+    shell: false
+  });
+}
+
 export function runPackage(args, cwd, extraEnv = {}) {
   const manager = packageManager();
-  const result = spawnSync(manager.command, manager.runArgs(args), {
+  const result = spawnPnpm(args, {
     cwd,
     stdio: 'inherit',
-    shell: process.platform === 'win32' && manager.command.toLowerCase().endsWith('.cmd'),
     env: { ...process.env, ...extraEnv }
   });
   if (result.status !== 0) fail(`${path.basename(manager.command)} ${args.join(' ')} failed with exit code ${result.status}.`);

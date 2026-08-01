@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url';
 
 const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const scripts = path.join(skillRoot, 'scripts');
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function pngFixture(label) {
+  return Buffer.concat([PNG_SIGNATURE, Buffer.from(label, 'utf8')]);
+}
 
 function run(script, args) {
   return spawnSync(process.execPath, [path.join(scripts, script), ...args], {
@@ -38,6 +43,25 @@ function createArgs(root, overrides = {}) {
     ...overrides
   };
   return Object.entries(values).flatMap(([key, value]) => value === null ? [] : [`--${key}`, value]);
+}
+
+function createAuditFixture(root, spriteBytes = pngFixture('generated sprite')) {
+  const sprites = path.join(root, 'project', 'src', 'assets', 'sprites');
+  const sprite = path.join(sprites, 'person-1', 'idle.png');
+  fs.mkdirSync(path.dirname(sprite), { recursive: true });
+  fs.mkdirSync(path.join(root, 'release'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'preview'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'project-manifest.json'), JSON.stringify({
+    schemaVersion: 2,
+    paths: { project: 'project', release: 'release', preview: 'preview' },
+    consent: { allSubjectsAuthorized: true }
+  }, null, 2));
+  fs.writeFileSync(path.join(sprites, 'manifest.json'), JSON.stringify({
+    schemaVersion: 1,
+    characters: [{ id: 'person-1', frames: { idle: ['person-1/idle.png'] } }]
+  }, null, 2));
+  fs.writeFileSync(sprite, spriteBytes);
+  return { sprite };
 }
 
 test('project creation validates consent and participants before writing output', (t) => {
@@ -198,4 +222,69 @@ test('output privacy audit accepts escaped relative Windows paths but rejects re
   const rejected = run('audit_output_privacy.mjs', ['--root', root]);
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /absolute\/private path/);
+});
+
+test('output privacy audit rejects exact source copies in project, release, and preview', (t) => {
+  const workspaceRoot = workspace(t);
+  const root = path.join(workspaceRoot, 'output');
+  const source = path.join(workspaceRoot, 'source.png');
+  const sourceBytes = pngFixture('original source');
+  fs.writeFileSync(source, sourceBytes);
+  const { sprite } = createAuditFixture(root);
+  const targets = [
+    sprite,
+    path.join(root, 'release', 'source.png'),
+    path.join(root, 'preview', 'source.png')
+  ];
+
+  for (const target of targets) {
+    fs.writeFileSync(target, sourceBytes);
+    const result = run('audit_output_privacy.mjs', ['--root', root, '--source', source]);
+    assert.notEqual(result.status, 0, `${path.relative(root, target)} unexpectedly passed`);
+    assert.match(result.stderr, /Original source photo was copied into output/);
+    if (target === sprite) fs.writeFileSync(target, pngFixture('generated sprite'));
+    else fs.rmSync(target);
+  }
+});
+
+test('output privacy audit allows generated sprites and same-name images with different content', (t) => {
+  const workspaceRoot = workspace(t);
+  const root = path.join(workspaceRoot, 'output');
+  const source = path.join(workspaceRoot, 'source.png');
+  fs.writeFileSync(source, pngFixture('original source'));
+  createAuditFixture(root, pngFixture('generated sprite'));
+  fs.writeFileSync(path.join(root, 'release', 'source.png'), pngFixture('different generated image'));
+
+  const result = run('audit_output_privacy.mjs', ['--root', root, '--source', source]);
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('output privacy audit resolves symlinks before source comparison', (t) => {
+  const workspaceRoot = workspace(t);
+  const root = path.join(workspaceRoot, 'output');
+  const source = path.join(workspaceRoot, 'source-assets', 'source.png');
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, pngFixture('original source'));
+  createAuditFixture(root);
+  let link = path.join(root, 'preview', 'linked-source.png');
+  try {
+    fs.symlinkSync(source, link, 'file');
+  } catch (error) {
+    if (['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) {
+      link = path.join(root, 'preview', 'linked-source');
+      try {
+        fs.symlinkSync(path.dirname(source), link, 'junction');
+      } catch (junctionError) {
+        t.skip(`Symlink and junction creation are unavailable: ${junctionError.code || error.code}`);
+        return;
+      }
+    } else {
+      throw error;
+    }
+  }
+
+  const result = run('audit_output_privacy.mjs', ['--root', root, '--source', source]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /preview\/linked-source/);
+  assert.doesNotMatch(result.stderr, new RegExp(source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
