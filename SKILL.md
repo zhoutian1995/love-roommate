@@ -7,13 +7,26 @@ description: Use when Codex needs to turn an authorized one-to-eight-person phot
 
 Treat this Skill as a method, mode library, and validation harness. Never bundle private photos or generated person artwork in the Skill repository.
 
+## User Conversation
+
+- Speak in the user's language; default to plain Chinese. Ask exactly one question per turn instead of presenting a configuration form.
+- The first reply after receiving a photo must include a short usability diagnosis, a left-to-right numbered list with distinguishing features, and only the authorization question. Never skip the diagnosis.
+- After diagnosis, describe people as `1号`, `2号`, and so on. Keep `person-N`, `none`, `leader`, `followers`, and mode keys out of user-facing replies.
+- Ask authorization first: `照片里的人都知道并同意制作桌宠吗？` Explain only in plain language: `我只能记录你的确认，不能替你证明其他人真的同意。` Stop immediately if the answer is no or unclear.
+- Then ask which numbered person is the user. Accept a number, `N号`, or `不在`; map it internally to `person-N` or `none`.
+- Present modes as numbered Chinese choices: `1 普通桌宠`, `2 排队跟随鼠标`, `3 接力恶搞`, `4 全部都要`. Map them internally to the supported mode keys.
+- Reuse valid choices the user already stated instead of asking again. With a one-person photo, never offer relay choices; describe mouse following as a single pet rather than a queue.
+- For choices 3 or 4, ask separately who starts at the front, then ask the remaining order. Explain plainly: the first person poops, the next person eats, and whoever finishes continues passing it backward. Accept arrows, commas, spaces, or natural Chinese.
+- If an answer is missing or invalid, repeat only that question. Never resend the whole questionnaire.
+- Before generating, summarize the user's identity, Chinese mode name, and relay order in natural language. Continue only after explicit confirmation.
+
 ## Required Gates
 
 1. Use Codex Desktop. Load workspace dependencies and retain its Node, pnpm, and node_modules paths. Read [references/codex-runtime.md](references/codex-runtime.md).
-2. Require the user to confirm that every depicted person authorized this use. Explain that the Skill records only the user's declaration; it cannot prove legal consent.
+2. Follow the User Conversation sequence. Require the user to confirm that every depicted person authorized this use. Explain briefly that the Skill records only the user's declaration; it cannot prove legal consent.
 3. Diagnose the photo before generation. Accept 1-8 separable people; report ambiguity, occlusion, cropping, low resolution, or clothing that may confuse identities.
-4. Number people left-to-right unless the user supplies a mapping. Ask whether the user appears and record `none` or one explicit `person-N`; never infer it.
-5. Require one mode: `normal`, `centipede`, `poop-relay`, or `all`. For relay modes, require one leader and an ordered, unique follower list. Do not make the user's character leader automatically.
+4. Number people left-to-right unless the user supplies a mapping. Show only friendly numbered labels, then convert the user's answer to `none` or one explicit `person-N`; never infer it.
+5. Convert the user's numbered Chinese mode choice to `normal`, `centipede`, `poop-relay`, or `all`. For relay modes, internally require one leader and an ordered, unique follower list. Do not make the user's character leader automatically.
 6. Read [references/visual-generation.md](references/visual-generation.md). Generate all final identity, base, and role artwork with Codex image generation under the declared GPT Image 2 policy. Save it only in the user's `preview/`; never in this Skill.
 7. Explain provenance honestly: `generation-manifest.json` is a workflow attestation plus file hash, not an OpenAI-signed model receipt and not resistant to deliberate forgery.
 8. Pause for identity approval before processing. Confirm numbering, faces, hair, clothing, self selection, mode, leader, and relay order.

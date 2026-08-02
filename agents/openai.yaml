@@ -1,4 +1,4 @@
 interface:
   display_name: "Love Roommate / 爱室友"
   short_description: "授权诊断、模式选择、素材生成与跨平台桌宠校验"
-  default_prompt: "使用 $love-roommate，先确认照片授权并诊断人物，让我选择哪位是自己、桌宠模式、领头人和接力顺序，再指导我用 GPT Image 2 生成素材、检查效果并构建跨平台桌宠。"
+  default_prompt: "使用 $love-roommate 处理我的合照。先简短诊断照片并按从左到右编号，再用中文一步一步问我，每次只问一个问题；人物只叫1号、2号，不要展示内部参数名。确认授权、本人、模式和必要的接力顺序后，再指导我用 GPT Image 2 生成素材、检查效果并构建跨平台桌宠。"
