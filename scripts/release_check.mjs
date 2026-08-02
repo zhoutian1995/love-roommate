@@ -72,7 +72,7 @@ if (process.env.SKIP_OFFICIAL_VALIDATOR !== '1') {
     ? path.resolve(process.env.OFFICIAL_VALIDATOR_PATH)
     : path.join(codexHome, 'skills', '.system', 'skill-creator', 'scripts', 'quick_validate.py');
   if (!python) failures.push('No Python with PyYAML found for official Skill validation. Install PyYAML or set SKIP_OFFICIAL_VALIDATOR=1 if you only need repo-level checks.');
-  else if (fs.existsSync(validator)) run('Official Skill validation', python, [validator, '.']);
+  else if (fs.existsSync(validator)) run('Official Skill validation', python, ['-X', 'utf8', validator, '.']);
   else failures.push(`Official validator not found at ${validator}. Set OFFICIAL_VALIDATOR_PATH or explicitly opt out with SKIP_OFFICIAL_VALIDATOR=1.`);
 }
 
