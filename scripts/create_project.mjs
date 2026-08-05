@@ -5,8 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { fail, parseArgs, readJson, slugify, writeJson } from './lib/common.mjs';
 
 const args = parseArgs(process.argv.slice(2));
-if (!args.name || !args.out || !args.people || !args.source || !args.mode || !args.self || !args.consent) {
-  fail('Usage: node create_project.mjs --name "App Name" --out <output-root> --source <photo> --people <1-8> --mode <normal|centipede|poop-relay|all> --self <none|person-N> --consent confirmed [--names "A,B"] [--leader person-N --followers "person-N,person-N"]');
+if (!args.name || !args.out || !args.people || !args.source || !args.mode || !args.self || args['prank-excluded'] === undefined || !args.consent) {
+  fail('Usage: node create_project.mjs --name "App Name" --out <output-root> --source <photo> --people <1-8> --mode <normal|centipede|poop-relay|all> --self <none|person-N> --prank-excluded <none|person-N,person-N> --consent confirmed [--names "A,B"] [--leader person-N --followers "person-N,person-N"]');
 }
 
 const appName = String(args.name).trim();
@@ -32,6 +32,17 @@ const characters = Array.from({ length: people }, (_, index) => ({
 const ids = characters.map((character) => character.id);
 const userCharacterId = args.self === 'none' ? null : String(args.self);
 if (userCharacterId && !ids.includes(userCharacterId)) fail('--self must be none or one of the generated person-N ids.');
+const prankExcludedInput = String(args['prank-excluded']);
+const explicitPrankExcludedIds = prankExcludedInput === 'none'
+  ? []
+  : prankExcludedInput.split(',').map((id) => id.trim()).filter(Boolean);
+if (prankExcludedInput !== 'none' && !explicitPrankExcludedIds.length) fail('--prank-excluded must be none or a comma-separated list of generated person-N ids.');
+if (new Set(explicitPrankExcludedIds).size !== explicitPrankExcludedIds.length) fail('--prank-excluded must not contain duplicates.');
+for (const id of explicitPrankExcludedIds) if (!ids.includes(id)) fail(`Unknown prank-excluded character: ${id}`);
+const prankExcludedCharacterIds = [
+  ...(userCharacterId ? [userCharacterId] : []),
+  ...explicitPrankExcludedIds.filter((id) => id !== userCharacterId)
+];
 const poopRelayEnabled = mode === 'poop-relay' || mode === 'all';
 const poopLeader = args.leader ? String(args.leader) : null;
 const poopFollowers = String(args.followers || '')
@@ -80,7 +91,7 @@ try {
   const config = readJson(configPath);
   config.app = { name: appName, id: appId, version: '1.0.0' };
   config.characters = characters;
-  config.selection = { mode, userCharacterId };
+  config.selection = { mode, userCharacterId, prankExcludedCharacterIds };
   writeJson(configPath, config);
 
   const behaviorsPath = path.join(project, 'src', 'config', 'behaviors.json');
@@ -116,6 +127,7 @@ try {
     selection: {
       mode,
       userCharacterId,
+      prankExcludedCharacterIds,
       leaderId: poopRelayEnabled ? poopLeader : null,
       followerIds: poopRelayEnabled ? poopFollowers : []
     },

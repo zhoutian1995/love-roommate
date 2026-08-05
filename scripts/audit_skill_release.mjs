@@ -9,7 +9,7 @@ const defaultSkillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url
 const skillRoot = rootIndex >= 0 ? path.resolve(args[rootIndex + 1] || '') : defaultSkillRoot;
 const forbiddenDirectories = new Set(['preview', 'release', 'dist', 'node_modules']);
 const ignoredDirectories = new Set(['.git']);
-const piiTextExtensions = new Set(['.json', '.md', '.yaml', '.yml', '.txt', '.log']);
+const piiTextExtensions = new Set(['.json', '.md', '.yaml', '.yml', '.txt', '.log', '.js', '.mjs']);
 const reservedEmailDomains = new Set(['example.com', 'example.net', 'example.org', 'example.test']);
 const errors = [];
 const files = [];
@@ -20,7 +20,18 @@ if (rootIndex >= 0 && !args[rootIndex + 1]) {
   process.exit(1);
 }
 
-function piiIssues(text) {
+function sourceCodeSensitivePathMatches(text) {
+  return sensitivePathMatches(text).filter((match) => {
+    if ([...match].every((character) => character === '\\')) return false;
+    const decoded = match.replaceAll('\\\\', '\\');
+    if (/^[A-Za-z]:\\Windows\\System32\\cmd\.exe$/i.test(decoded)) return false;
+    if (match.startsWith('\\\\') && !match.startsWith('\\\\\\\\')) return false;
+    if (/\\s|\\u[0-9a-f]{4}|\[\^|\.test\(|\]\/|\$&|roundedX/i.test(match)) return false;
+    return true;
+  });
+}
+
+function piiIssues(text, sourceCode = false) {
   const issues = [];
   const emails = text.match(/[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,})/gi) || [];
   if (emails.some((email) => !reservedEmailDomains.has(email.split('@').at(-1).toLowerCase()))) {
@@ -32,7 +43,7 @@ function piiIssues(text) {
   if (/(?:微信号?|wechat(?:\s+id)?|qq号?|账号|account(?:\s+(?:id|name))?|用户名|username)\s*[:：]\s*(?!<|\[|\{|example\b|test\b|placeholder\b|your\b|person-\d+\b)\S+/im.test(text)) {
     issues.push('account identifier');
   }
-  if (sensitivePathMatches(text).length) issues.push('private path');
+  if ((sourceCode ? sourceCodeSensitivePathMatches(text) : sensitivePathMatches(text)).length) issues.push('private path');
   return issues;
 }
 
@@ -43,7 +54,9 @@ while (stack.length) {
     const relative = path.relative(skillRoot, full);
     if (entry.isDirectory()) {
       if (ignoredDirectories.has(entry.name)) continue;
-      if (forbiddenDirectories.has(entry.name)) errors.push(`Generated/runtime directory must not be published inside the Skill: ${relative}`);
+      const portableRelative = relative.split(path.sep).join('/');
+      if (portableRelative === 'docs/superpowers') errors.push(`Private planning document directory must not be published inside the Skill: ${relative}`);
+      else if (forbiddenDirectories.has(entry.name)) errors.push(`Generated/runtime directory must not be published inside the Skill: ${relative}`);
       else stack.push(full);
       continue;
     }
@@ -54,8 +67,9 @@ while (stack.length) {
       errors.push(`SVG must not embed raster image data: ${relative}`);
     }
     if (fs.statSync(full).size > 1024 * 1024) errors.push(`Unexpected file larger than 1 MiB: ${relative}`);
-    if (piiTextExtensions.has(path.extname(entry.name).toLowerCase())) {
-      for (const issue of piiIssues(fs.readFileSync(full, 'utf8'))) {
+    const extension = path.extname(entry.name).toLowerCase();
+    if (piiTextExtensions.has(extension)) {
+      for (const issue of piiIssues(fs.readFileSync(full, 'utf8'), extension === '.js' || extension === '.mjs')) {
         errors.push(`Text ${issue} must not be published in the Skill: ${relative}`);
       }
     }

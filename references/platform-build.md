@@ -28,6 +28,6 @@ Never treat a Windows-produced macOS directory as a verified `.app`. Preserve th
 - Right-click the visible character to open recovery controls; clicks outside opaque pixels must reach the underlying app.
 - Verify poop relay and ordinary centipede are mutually exclusive, pause freezes both people and the current dropping, and exiting relay mode hides the persistent dropped-effect window.
 - Verify every human-centipede mouth touches the previous rear. Verify relay keeps exactly one dropping and every eater becomes the next poop source only after eating finishes.
-- Verify dad and grandpa commands gather everyone into one kneeling row, play three synchronized shout beats, and return to free mode.
+- Verify dad and grandpa reports distinguish `recipientId`, `participantIds`, `excludedIds`, and `skippedReason`. When present, the recipient must move at the configured speed to the row center axis, stand in front without overlap, remain idle, and show no prank bubble. Eligible participants must face the recipient, form one kneeling row, play three synchronized shout beats, and return to free mode. Additional exclusions remain spectators; a fully excluded participant set must be a safe no-op even when a recipient exists.
 - Use tray Pause and Quit as recovery controls.
 - On centipede exit, show only the configured grandpa phrase when `exitShout` is enabled.

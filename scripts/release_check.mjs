@@ -53,8 +53,8 @@ else {
   );
 }
 run('Security hardening tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'security-hardening.test.mjs'), path.join(skillRoot, 'scripts', 'tests', 'runtime-security.test.mjs')]);
-run('Template unit tests', process.execPath, ['--test', path.join(skillRoot, 'assets', 'electron-template', 'tests', 'behavior-engine.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'performance-v2.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'config.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'security.test.mjs')]);
-run('Release policy tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'release-policy.test.mjs')]);
+run('Template unit tests', process.execPath, ['--test', path.join(skillRoot, 'assets', 'electron-template', 'tests', 'behavior-engine.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'performance-v2.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'performance-audit.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'config.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'security.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'scenario-capture.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'window-size-regression.test.mjs')]);
+run('Release policy tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'release-policy.test.mjs'), path.join(skillRoot, 'scripts', 'tests', 'performance-gate.test.mjs'), path.join(skillRoot, 'scripts', 'tests', 'utf8-integrity.test.mjs')]);
 for (const issue of auditTextFilesForSensitivePaths(skillRoot, new Set(['.json', '.md', '.yaml', '.yml', '.txt']))) {
   failures.push(`${issue.file} contains absolute/private path text.`);
 }

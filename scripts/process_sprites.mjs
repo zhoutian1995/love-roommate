@@ -130,9 +130,6 @@ const frames = {
   centipede_right: [`${characterId}/centipede_right.png`],
   centipede_left: [`${characterId}/centipede_left.png`],
   shout: [`${characterId}/shout_1.png`, `${characterId}/shout_2.png`, `${characterId}/shout_3.png`],
-  kneel_shout_1: [`${characterId}/shout_1.png`],
-  kneel_shout_2: [`${characterId}/shout_2.png`],
-  kneel_shout_3: [`${characterId}/shout_3.png`],
   drag: [`${characterId}/drag.png`]
 };
 const manifestEntry = manifest.characters.find((character) => character.id === characterId);

@@ -16,6 +16,10 @@ if (new Set(ids).size !== ids.length) errors.push('Character ids must be unique.
 const selection = config.selection || {};
 if (!['normal', 'centipede', 'poop-relay', 'all'].includes(selection.mode)) errors.push('Invalid selected mode.');
 if (selection.userCharacterId !== null && !ids.includes(selection.userCharacterId)) errors.push('Invalid selected user character.');
+const prankExcludedIds = Array.isArray(selection.prankExcludedCharacterIds) ? selection.prankExcludedCharacterIds : [];
+if (!Array.isArray(selection.prankExcludedCharacterIds)) errors.push('Invalid prank-excluded character list.');
+if (new Set(prankExcludedIds).size !== prankExcludedIds.length || prankExcludedIds.some((id) => !ids.includes(id))) errors.push('Prank-excluded characters must be unique configured characters.');
+if (selection.userCharacterId !== null && !prankExcludedIds.includes(selection.userCharacterId)) errors.push('The selected user character must be excluded from prank actions.');
 if (!behaviors.hotkeys?.poopChase) errors.push('Missing poop-chase hotkey.');
 const poopChase = behaviors.poopChase || {};
 const poopFollowers = Array.isArray(poopChase.followerIds) ? poopChase.followerIds : [];
@@ -31,7 +35,7 @@ if (poopChase.maxDroppings !== 1) errors.push('Poop relay must keep exactly one 
 const baseGroups = [
   'crawl_right', 'crawl_left', 'idle_right', 'idle_left',
   'centipede_right', 'centipede_left',
-  'kneel_shout_1', 'kneel_shout_2', 'kneel_shout_3', 'drag'
+  'shout', 'drag'
 ];
 const relayParticipants = new Set(poopChase.enabled ? [poopChase.leaderId, ...poopFollowers] : []);
 

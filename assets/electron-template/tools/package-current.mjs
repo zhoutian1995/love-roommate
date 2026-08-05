@@ -1,9 +1,14 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const packagerFile = fileURLToPath(import.meta.url);
+const root = path.resolve(path.dirname(packagerFile), '..');
+const require = createRequire(import.meta.url);
+const { PERFORMANCE_FINGERPRINT_SCHEMA_VERSION } = require(path.join(root, 'src', 'performance-audit.js'));
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const config = JSON.parse(fs.readFileSync(path.join(root, 'src', 'config', 'pet.config.json'), 'utf8'));
 const electronDist = path.resolve(process.env.PET_ELECTRON_DIST || path.join(root, 'node_modules', 'electron', 'dist'));
@@ -11,6 +16,18 @@ if (!fs.existsSync(electronDist)) {
   console.error('Electron runtime is missing. Run the Skill build command while Codex is online.');
   process.exit(1);
 }
+const pinnedElectronVersion = packageJson.devDependencies?.electron;
+const actualElectronVersion = fs.readFileSync(path.join(electronDist, 'version'), 'utf8').trim();
+if (actualElectronVersion !== pinnedElectronVersion) {
+  throw new Error(`Electron runtime version ${actualElectronVersion} does not match pinned ${pinnedElectronVersion}.`);
+}
+const runtimeBuild = {
+  schemaVersion: PERFORMANCE_FINGERPRINT_SCHEMA_VERSION,
+  electronVersion: actualElectronVersion,
+  platform: process.platform,
+  arch: process.arch,
+  packageCurrentSha256: crypto.createHash('sha256').update(fs.readFileSync(packagerFile)).digest('hex')
+};
 
 const productName = packageJson.petBuild?.productName || config.app.name;
 const safeName = productName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim() || 'Love Roommate';
@@ -32,12 +49,15 @@ function installApp(resourcesDir) {
   fs.rmSync(appDir, { recursive: true, force: true });
   fs.mkdirSync(appDir, { recursive: true });
   fs.cpSync(path.join(root, 'src'), path.join(appDir, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(appDir, 'tools'), { recursive: true });
+  fs.copyFileSync(packagerFile, path.join(appDir, 'tools', 'package-current.mjs'));
   fs.writeFileSync(path.join(appDir, 'package.json'), `${JSON.stringify({
     name: packageJson.name,
     version: packageJson.version,
     private: true,
     main: 'src/main.js'
   }, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(path.join(appDir, 'runtime-build.json'), `${JSON.stringify(runtimeBuild, null, 2)}\n`, 'utf8');
 }
 
 if (process.platform === 'win32' && process.arch === 'x64') {

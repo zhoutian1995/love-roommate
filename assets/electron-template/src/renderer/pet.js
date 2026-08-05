@@ -14,6 +14,11 @@ let dragging = false;
 let suppressContextMenuUntil = 0;
 const hitSlopPx = 6;
 
+window.petApi.onPaused((paused) => document.documentElement.classList.toggle('paused', Boolean(paused)));
+window.petApi.onPresentRequest(() => {
+  requestAnimationFrame(() => requestAnimationFrame(() => window.petApi.signalPresented()));
+});
+
 function assetUrl(path) {
   return new URL(`../assets/${path}`, window.location.href).href;
 }

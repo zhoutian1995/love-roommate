@@ -5,8 +5,10 @@ Replace placeholders with paths returned by `codex_app__load_workspace_dependenc
 ## Create
 
 ```text
-"<codex-node>" "<skill>/scripts/create_project.mjs" --name "<app name>" --out "<output root>" --source "<photo>" --people <1-8> --names "<names>" --mode <normal|centipede|poop-relay|all> --self <none|person-N> --consent confirmed [--leader person-N --followers "person-N,person-N"]
+"<codex-node>" "<skill>/scripts/create_project.mjs" --name "<app name>" --out "<output root>" --source "<photo>" --people <1-8> --names "<names>" --mode <normal|centipede|poop-relay|all> --self <none|person-N> --prank-excluded <none|person-N,person-N> --consent confirmed [--leader person-N --followers "person-N,person-N"]
 ```
+
+Collect `--self` and `--prank-excluded` in separate user questions. Never infer either value. The creator automatically adds a non-`none` self character to the exclusion list and validators reject attempts to omit it. Runtime treats that selected self as the standing dad/grandpa recipient; additional excluded ids remain spectators.
 
 ## Record and process images
 

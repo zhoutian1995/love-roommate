@@ -51,6 +51,7 @@ class BehaviorEngine {
     this.poopRelay = null;
     this.shoutStartedAt = 0;
     this.shoutTargetIds = new Set();
+    this.shoutSequence = null;
     this.nextTurnAt = 0;
     this.nextDadAt = this.randomDadDelay();
     this.pets = config.characters.map((character, index) => this.createPet(character, index));
@@ -184,7 +185,11 @@ class BehaviorEngine {
     this.droppings = [];
     this.lastDropPoint = null;
     this.poopRelay = null;
+    this.shoutSequence = null;
+    this.shoutTargetIds.clear();
     this.pets.forEach((pet) => {
+      pet.phrase = '';
+      pet.phraseUntil = 0;
       pet.effect = '';
       pet.effectSize = this.config.render.effectSize;
       pet.poopUntil = 0;
@@ -239,53 +244,248 @@ class BehaviorEngine {
     }
   }
 
-  callDad(group = true) {
-    this.interruptFormation();
-    const duration = 4.2;
-    const targets = group ? this.pets : [this.pets[Math.floor(this.random() * this.pets.length)]];
-    this.arrangeKneelingRow(targets);
-    targets.forEach((pet) => {
-      pet.phrase = this.behaviors.phrases.dad;
-      pet.phraseUntil = this.elapsed + duration;
-      pet.action = 'kneel_shout_1';
-    });
-    this.shoutTargetIds = new Set(targets.map((pet) => pet.id));
-    this.mode = 'shout';
-    this.shoutStartedAt = this.elapsed;
-    this.modeUntil = this.elapsed + duration;
+  callDad() {
+    return this.startGroupShout(this.behaviors.phrases.dad);
   }
 
   callGrandpa() {
-    this.interruptFormation();
-    const duration = 4.2;
-    this.arrangeKneelingRow(this.pets);
-    this.shoutTargetIds = new Set(this.pets.map((pet) => pet.id));
-    this.pets.forEach((pet) => {
-      pet.phrase = this.behaviors.phrases.grandpa;
-      pet.phraseUntil = this.elapsed + duration;
-      pet.action = 'kneel_shout_1';
-    });
-    this.mode = 'shout';
-    this.shoutStartedAt = this.elapsed;
-    this.modeUntil = this.elapsed + duration;
+    return this.startGroupShout(this.behaviors.phrases.grandpa);
   }
 
-  arrangeKneelingRow(participants, display = null) {
-    if (!participants.length) return;
+  prankExcludedIds() {
+    const excludedIds = new Set(this.config.selection?.prankExcludedCharacterIds || []);
+    const recipientId = this.config.selection?.userCharacterId;
+    if (recipientId) excludedIds.add(recipientId);
+    return excludedIds;
+  }
+
+  shoutRecipient() {
+    const recipientId = this.config.selection?.userCharacterId;
+    return recipientId ? this.pets.find((pet) => pet.id === recipientId) || null : null;
+  }
+
+  shoutParticipants() {
+    const settings = this.behaviors.poopChase || {};
+    const orderedIds = [settings.leaderId, ...(settings.followerIds || [])];
+    const excludedIds = this.prankExcludedIds();
+    const seen = new Set();
+    const participants = [];
+    for (const id of orderedIds) {
+      const pet = this.pets.find((item) => item.id === id);
+      if (pet && !excludedIds.has(pet.id) && !seen.has(pet.id)) {
+        seen.add(pet.id);
+        participants.push(pet);
+      }
+    }
+    for (const pet of this.pets) {
+      if (!excludedIds.has(pet.id) && !seen.has(pet.id)) participants.push(pet);
+    }
+    return participants;
+  }
+
+  startGroupShout(phrase) {
+    const participants = this.shoutParticipants();
+    const recipient = this.shoutRecipient();
+    const result = {
+      started: participants.length > 0,
+      recipientId: recipient?.id || null,
+      participantIds: participants.map((pet) => pet.id),
+      excludedIds: [...this.prankExcludedIds()],
+      skippedReason: participants.length ? null : 'no-eligible-participants'
+    };
+    if (!participants.length) return result;
+    this.interruptFormation();
+    const formation = this.groupShoutTargets(participants, recipient);
+    this.shoutTargetIds = new Set(participants.map((pet) => pet.id));
+    this.shoutSequence = {
+      phase: 'forming',
+      phaseStartedAt: this.elapsed,
+      phrase,
+      participants,
+      targets: formation.participantTargets,
+      recipient,
+      recipientTarget: formation.recipientTarget
+    };
+    participants.forEach((pet) => {
+      pet.phrase = '';
+      pet.phraseUntil = 0;
+      pet.action = pet.direction === 'left' ? 'idle_left' : 'idle_right';
+      pet.frame = 0;
+      pet.dragging = false;
+    });
+    if (recipient) {
+      recipient.phrase = '';
+      recipient.phraseUntil = 0;
+      recipient.action = recipient.direction === 'left' ? 'idle_left' : 'idle_right';
+      recipient.frame = 0;
+      recipient.dragging = false;
+    }
+    this.mode = 'shout';
+    this.modeUntil = Number.POSITIVE_INFINITY;
+    return result;
+  }
+
+  kneelingRowTargets(participants, display = null) {
+    if (!participants.length) return new Map();
     const size = this.config.render.spriteSize;
     const activeDisplay = display || this.getDisplayForPoint({ x: participants[0].x + size / 2, y: participants[0].y + size / 2 });
     const gap = Math.max(8, size * 0.08);
     const totalWidth = participants.length * size + (participants.length - 1) * gap;
     const left = activeDisplay.workArea.x + Math.max(0, (activeDisplay.workArea.width - totalWidth) / 2);
-    const top = activeDisplay.workArea.y + activeDisplay.workArea.height - size - Math.max(24, size * 0.22);
-    participants.forEach((pet, index) => {
-      pet.x = left + index * (size + gap);
-      pet.y = top;
+    const windowPadding = Math.max(0, (this.config.render.windowSize - size) / 2);
+    const top = activeDisplay.workArea.y + activeDisplay.workArea.height - size - windowPadding - Math.max(24, size * 0.22);
+    return new Map(participants.map((pet, index) => [pet.id, {
+      x: left + index * (size + gap),
+      y: top
+    }]));
+  }
+
+  groupShoutTargets(participants, recipient) {
+    const size = this.config.render.spriteSize;
+    const focus = recipient || participants[0];
+    const activeDisplay = this.getDisplayForPoint({ x: focus.x + size / 2, y: focus.y + size / 2 });
+    const participantTargets = this.kneelingRowTargets(participants, activeDisplay);
+    if (!recipient) return { participantTargets, recipientTarget: null };
+    const rowTarget = participantTargets.values().next().value;
+    const windowPadding = Math.max(0, (this.config.render.windowSize - size) / 2);
+    const verticalGap = Math.max(16, size * 0.18);
+    return {
+      participantTargets,
+      recipientTarget: {
+        x: activeDisplay.workArea.x + (activeDisplay.workArea.width - size) / 2,
+        y: Math.max(activeDisplay.workArea.y + windowPadding, rowTarget.y - size - verticalGap)
+      }
+    };
+  }
+
+  moveShoutActor(pet, target, gatherSpeed, dt, standing) {
+    const deltaX = target.x - pet.x;
+    const deltaY = target.y - pet.y;
+    const remaining = Math.hypot(deltaX, deltaY);
+    const step = Math.min(remaining, gatherSpeed * dt);
+    const ratio = remaining > 0 ? step / remaining : 0;
+    pet.x += deltaX * ratio;
+    pet.y += deltaY * ratio;
+    pet.vx = dt > 0 ? deltaX * ratio / dt : 0;
+    pet.vy = dt > 0 ? deltaY * ratio / dt : 0;
+    if (Math.abs(deltaX) >= 0.01) pet.direction = deltaX > 0 ? 'right' : 'left';
+    pet.action = standing
+      ? (pet.direction === 'right' ? 'idle_right' : 'idle_left')
+      : (pet.direction === 'right' ? 'crawl_right' : 'crawl_left');
+    pet.frame = 0;
+    pet.phrase = '';
+    pet.phraseUntil = 0;
+    pet.dragging = false;
+    return remaining - step <= 0.01;
+  }
+
+  holdShoutRecipient(sequence) {
+    if (!sequence.recipient || !sequence.recipientTarget) return;
+    const pet = sequence.recipient;
+    Object.assign(pet, sequence.recipientTarget, {
+      vx: 0,
+      vy: 0,
+      action: pet.direction === 'left' ? 'idle_left' : 'idle_right',
+      frame: 0,
+      phrase: '',
+      phraseUntil: 0,
+      dragging: false
+    });
+  }
+
+  updateShout(dt) {
+    const sequence = this.shoutSequence;
+    if (!sequence) {
+      this.finishGroupShout();
+      return;
+    }
+    const settings = this.behaviors.groupShout || {};
+    const gatherSpeed = finite(settings.gatherSpeed) && settings.gatherSpeed > 0 ? settings.gatherSpeed : 180;
+    const kneelDelay = (finite(settings.kneelDelayMs) ? Math.max(0, settings.kneelDelayMs) : 350) / 1000;
+    const frameDuration = (finite(settings.frameDurationMs) && settings.frameDurationMs > 0 ? settings.frameDurationMs : 1400) / 1000;
+
+    if (sequence.phase === 'forming') {
+      let allArrived = true;
+      for (const pet of sequence.participants) {
+        const target = sequence.targets.get(pet.id);
+        if (!this.moveShoutActor(pet, target, gatherSpeed, dt, false)) allArrived = false;
+      }
+      if (sequence.recipient && !this.moveShoutActor(sequence.recipient, sequence.recipientTarget, gatherSpeed, dt, true)) allArrived = false;
+      if (allArrived) {
+        this.holdShoutRecipient(sequence);
+        const size = this.config.render.spriteSize;
+        const recipientCenter = sequence.recipientTarget ? sequence.recipientTarget.x + size / 2 : null;
+        for (const pet of sequence.participants) {
+          const target = sequence.targets.get(pet.id);
+          Object.assign(pet, target, {
+            vx: 0,
+            vy: 0,
+            direction: recipientCenter === null || pet.x + size / 2 < recipientCenter ? 'right' : 'left',
+            action: 'shout',
+            frame: 0,
+            phrase: '',
+            phraseUntil: 0
+          });
+        }
+        sequence.phase = 'kneeling';
+        sequence.phaseStartedAt = this.elapsed;
+      }
+      return;
+    }
+
+    if (sequence.phase === 'kneeling') {
+      this.holdShoutRecipient(sequence);
+      for (const pet of sequence.participants) {
+        pet.action = 'shout';
+        pet.frame = 0;
+        pet.phrase = '';
+        pet.phraseUntil = 0;
+      }
+      if (this.elapsed - sequence.phaseStartedAt < kneelDelay) return;
+      sequence.phase = 'shouting';
+      sequence.phaseStartedAt = this.elapsed;
+      this.shoutStartedAt = this.elapsed;
+      this.modeUntil = this.elapsed + frameDuration * 3;
+    }
+
+    const shoutElapsed = this.elapsed - sequence.phaseStartedAt;
+    if (shoutElapsed + 1e-9 >= frameDuration * 3) {
+      this.finishGroupShout();
+      return;
+    }
+    const frame = Math.min(2, Math.floor((shoutElapsed + 1e-9) / frameDuration));
+    this.holdShoutRecipient(sequence);
+    for (const pet of sequence.participants) {
       pet.vx = 0;
       pet.vy = 0;
       pet.direction = 'right';
-      pet.dragging = false;
+      pet.action = 'shout';
+      pet.frame = frame;
+      pet.phrase = sequence.phrase;
+      pet.phraseUntil = this.modeUntil;
+    }
+  }
+
+  finishGroupShout() {
+    const participants = this.shoutSequence?.participants || [];
+    const recipient = this.shoutSequence?.recipient || null;
+    this.mode = 'free';
+    this.shoutSequence = null;
+    this.shoutTargetIds.clear();
+    participants.forEach((pet) => {
+      pet.phrase = '';
+      pet.phraseUntil = 0;
+      pet.vx = 0;
+      pet.vy = 0;
+      pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
     });
+    if (recipient) {
+      recipient.phrase = '';
+      recipient.phraseUntil = 0;
+      recipient.vx = 0;
+      recipient.vy = 0;
+      recipient.action = recipient.direction === 'right' ? 'idle_right' : 'idle_left';
+    }
   }
 
   arrangeCentipedeRow(participants, display = null) {
@@ -422,19 +622,7 @@ class BehaviorEngine {
       pet.frame = (pet.frame + safeDt * 6) % 10000;
     });
     if (this.mode === 'shout') {
-      if (this.elapsed >= this.modeUntil) {
-        this.mode = 'free';
-        this.shoutTargetIds.clear();
-        this.pets.forEach((pet) => {
-          pet.phrase = '';
-          pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
-        });
-      } else {
-        const frame = Math.min(3, Math.floor((this.elapsed - this.shoutStartedAt) / 1.4) + 1);
-        this.pets.forEach((pet) => {
-          if (this.shoutTargetIds.has(pet.id)) pet.action = `kneel_shout_${frame}`;
-        });
-      }
+      this.updateShout(safeDt);
       this.sanitizeState();
       return this.snapshot();
     }
@@ -453,7 +641,7 @@ class BehaviorEngine {
     this.updateFree(safeDt);
     this.sanitizeState();
     if (this.behaviors.randomDad.enabled && this.elapsed >= this.nextDadAt) {
-      this.callDad(this.random() < this.behaviors.randomDad.groupChance);
+      this.callDad();
       this.nextDadAt = this.elapsed + this.randomDadDelay();
     }
     return this.snapshot();
@@ -720,6 +908,7 @@ class BehaviorEngine {
   snapshot() {
     return {
       mode: this.mode,
+      shoutPhase: this.shoutSequence?.phase || null,
       paused: this.paused,
       pets: this.pets.map((pet) => ({ ...pet })),
       droppings: this.droppings.map((dropping) => ({ ...dropping, eatenBy: [...dropping.eatenBy] }))

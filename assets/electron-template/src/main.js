@@ -1,7 +1,9 @@
 'use strict';
 
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
+const { monitorEventLoopDelay, performance: nodePerformance } = require('node:perf_hooks');
 const zlib = require('node:zlib');
 const {
   app,
@@ -15,6 +17,21 @@ const {
   Tray
 } = require('electron');
 const { BehaviorEngine } = require('./behavior-engine');
+const {
+  DEFAULT_PERFORMANCE_THRESHOLDS,
+  PERFORMANCE_FINGERPRINT_SCHEMA_VERSION,
+  PERFORMANCE_METRIC_SOURCE,
+  PERFORMANCE_REPORT_SCHEMA_VERSION,
+  compensatedTickerDelay,
+  evaluatePerformanceReport,
+  nextTickerSchedule,
+  nextTickerDelay,
+  petRenderKey,
+  runtimeFingerprintForProject,
+  summarizePerformancePhase,
+  summarizeProcessLifecycle
+} = require('./performance-audit');
+const { fitCaptureToLogicalBounds } = require('./scenario-capture');
 const { authorizePetEvent, denySessionPermissions, hardenWebContents } = require('./security');
 
 const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config', 'pet.config.json'), 'utf8'));
@@ -28,13 +45,17 @@ let tray;
 let cursorPoopWindow;
 let droppingPoopWindow;
 let ticker;
+let tickerDeadline = null;
 let previousTick = Date.now();
 let quitting = false;
 let scenarioTest = null;
+let performanceAudit = null;
 const petWindows = new Map();
 const droppingWindows = new Map();
 const dragStates = new Map();
 const positionWarnings = new Map();
+const visiblePetIds = new Set();
+const presentedPetIds = new Set();
 const MIN_WINDOW_COORDINATE = -2147483648;
 const MAX_WINDOW_COORDINATE = 2147483647;
 
@@ -54,10 +75,10 @@ function warnPosition(label, message) {
   console.error(`[window-position:${label}] ${message}`);
 }
 
-function safeSetPosition(win, x, y, label) {
+function safeSetPosition(win, x, y, label, width, height) {
   if (!win || win.isDestroyed()) return false;
-  if (!Number.isFinite(x) || !Number.isFinite(y)) {
-    warnPosition(label, `Skipped non-finite coordinates x=${x}, y=${y}`);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    warnPosition(label, `Skipped non-finite bounds x=${x}, y=${y}, width=${width}, height=${height}`);
     return false;
   }
   const roundedX = Math.round(x);
@@ -67,7 +88,7 @@ function safeSetPosition(win, x, y, label) {
     return false;
   }
   try {
-    win.setPosition(roundedX, roundedY, false);
+    win.setBounds({ x: roundedX, y: roundedY, width, height }, false);
     return true;
   } catch (error) {
     warnPosition(label, error?.stack || error?.message || String(error));
@@ -80,15 +101,15 @@ function smokeDelay(name, fallback, minimum = 100) {
   return Number.isFinite(value) && value >= minimum ? Math.round(value) : fallback;
 }
 
-function exitAutomatedTest() {
+function exitAutomatedTest(exitCode = 0) {
   if (quitting) return;
   quitting = true;
-  if (ticker) clearInterval(ticker);
+  if (ticker) clearTimeout(ticker);
   globalShortcut.unregisterAll();
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.destroy();
   }
-  app.exit(0);
+  app.exit(exitCode);
 }
 
 function crc32(buffer) {
@@ -184,12 +205,14 @@ function createPetWindow(character) {
     shown = true;
     setWindowInteractive(win, false);
     win.showInactive();
+    visiblePetIds.add(character.id);
+    win.webContents.send('pet:present-request');
   };
   win.once('ready-to-show', showWindow);
-  win.webContents.once('did-finish-load', showWindow);
+  const entry = { win, interactive: false, lastBounds: null, lastRenderKey: null };
   win.loadFile(PET_PAGE);
   win.on('closed', () => petWindows.delete(character.id));
-  petWindows.set(character.id, { win, interactive: false });
+  petWindows.set(character.id, entry);
 }
 
 function createEffectWindow(asset, size) {
@@ -216,6 +239,11 @@ function createEffectWindow(asset, size) {
 function createCursorPoopWindow() {
   const size = Math.max(28, config.render.effectSize + 8);
   cursorPoopWindow = createEffectWindow('poop', size);
+  return cursorPoopWindow;
+}
+
+function ensureCursorPoopWindow() {
+  return !cursorPoopWindow || cursorPoopWindow.isDestroyed() ? createCursorPoopWindow() : cursorPoopWindow;
 }
 
 function createDroppingPoopWindow() {
@@ -238,7 +266,7 @@ function reconcileDroppingWindows(droppings) {
   const size = behaviors.poopChase?.poopSize || 26;
   const win = ensureDroppingPoopWindow();
   droppingWindows.set(dropping.id, win);
-  if (!safeSetPosition(win, dropping.x - size / 2, dropping.y - size / 2, `dropping:${dropping.id}`)) {
+  if (!safeSetPosition(win, dropping.x - size / 2, dropping.y - size / 2, `dropping:${dropping.id}`, size, size)) {
     if (win.isVisible()) win.hide();
     return;
   }
@@ -260,10 +288,26 @@ function togglePoopChase() {
   refreshTrayMenu();
 }
 
+function broadcastPauseState() {
+  for (const entry of petWindows.values()) {
+    if (!entry.win.isDestroyed() && !entry.win.webContents.isLoading()) entry.win.webContents.send('pet:paused', engine.paused);
+  }
+}
+
+function togglePause() {
+  engine.togglePause();
+  broadcastPauseState();
+  previousTick = Date.now();
+  if (ticker) clearTimeout(ticker);
+  ticker = null;
+  scheduleTicker(engine.paused ? nextTickerDelay(true) : 0);
+  refreshTrayMenu();
+}
+
 function menuTemplate() {
   return [
-    { label: '全员叫爸爸', accelerator: behaviors.hotkeys.dad, click: () => engine.callDad(true) },
-    { label: '全员叫爷爷', accelerator: behaviors.hotkeys.grandpa, click: () => engine.callGrandpa() },
+    { label: '参与人物叫爸爸', accelerator: behaviors.hotkeys.dad, click: () => engine.callDad() },
+    { label: '参与人物叫爷爷', accelerator: behaviors.hotkeys.grandpa, click: () => engine.callGrandpa() },
     { type: 'separator' },
     { label: engine.mode === 'centipede' ? '退出人体蜈蚣模式' : '人体蜈蚣模式', accelerator: behaviors.hotkeys.centipede, click: toggleCentipede },
     {
@@ -272,7 +316,7 @@ function menuTemplate() {
       enabled: Boolean(behaviors.poopChase?.enabled),
       click: togglePoopChase
     },
-    { label: engine.paused ? '继续' : '暂停', accelerator: behaviors.hotkeys.pause, click: () => { engine.togglePause(); refreshTrayMenu(); } },
+    { label: engine.paused ? '继续' : '暂停', accelerator: behaviors.hotkeys.pause, click: togglePause },
     { label: '重新散开', click: () => engine.respawn() },
     { type: 'separator' },
     { label: '退出桌宠', click: () => { quitting = true; app.quit(); } }
@@ -288,16 +332,16 @@ function createTray() {
   tray = new Tray(createTrayImage());
   tray.setToolTip(config.app.name);
   refreshTrayMenu();
-  tray.on('click', () => engine.togglePause());
+  tray.on('click', togglePause);
 }
 
 function registerShortcuts() {
   const registrations = [
-    [behaviors.hotkeys.dad, () => engine.callDad(true)],
+    [behaviors.hotkeys.dad, () => engine.callDad()],
     [behaviors.hotkeys.grandpa, () => engine.callGrandpa()],
     [behaviors.hotkeys.centipede, toggleCentipede],
     [behaviors.hotkeys.poopChase, togglePoopChase],
-    [behaviors.hotkeys.pause, () => { engine.togglePause(); refreshTrayMenu(); }]
+    [behaviors.hotkeys.pause, togglePause]
   ];
   for (const [accelerator, callback] of registrations) {
     if (!accelerator) continue;
@@ -305,56 +349,138 @@ function registerShortcuts() {
   }
 }
 
+
+function stageGroupShoutScenario(primary) {
+  const size = config.render.spriteSize;
+  const width = Math.max(1, primary.workArea.width - size);
+  const height = Math.max(1, primary.workArea.height - size);
+  const points = [
+    [0.04, 0.12],
+    [0.82, 0.25],
+    [0.18, 0.55],
+    [0.68, 0.72],
+    [0.46, 0.06]
+  ];
+  engine.pets.forEach((pet, index) => {
+    const point = points[index % points.length];
+    pet.x = primary.workArea.x + width * point[0];
+    pet.y = primary.workArea.y + height * point[1];
+    pet.vx = 0;
+    pet.vy = 0;
+    pet.direction = index % 2 ? 'left' : 'right';
+    pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
+    pet.frame = 0;
+    pet.phrase = '';
+    pet.phraseUntil = 0;
+  });
+}
+
 function startScenarioTest() {
   const scenario = process.env.PET_SCENARIO_TEST;
-  if (scenario !== 'poop-chase' && scenario !== 'centipede') return;
-  const poopParticipants = scenario === 'poop-chase' ? engine.poopChaseParticipants() : null;
-  const leader = scenario === 'poop-chase' ? poopParticipants.leader : engine.pets[0];
-  const followers = scenario === 'poop-chase' ? poopParticipants.followers : engine.pets.slice(1);
-  if (!leader || !followers.length || (scenario === 'poop-chase' && !poopParticipants.settings.enabled)) return;
-  const direction = process.env.PET_SCENARIO_DIRECTION === 'left' ? 'left' : 'right';
+  const groupShout = scenario === 'dad-shout' || scenario === 'grandpa-shout';
+  if (!groupShout && scenario !== 'poop-chase' && scenario !== 'centipede') return;
+  engine.nextDadAt = Number.POSITIVE_INFINITY;
   const primary = screen.getPrimaryDisplay();
+  const direction = process.env.PET_SCENARIO_DIRECTION === 'left' ? 'left' : 'right';
   const size = config.render.spriteSize;
-  const rightHead = engine.anchorsFor(leader, 'right').head;
-  const leftHead = engine.anchorsFor(leader, 'left').head;
-  const followAnchor = { x: (rightHead[0] + leftHead[0]) / 2, y: (rightHead[1] + leftHead[1]) / 2 };
-  leader.x = primary.workArea.x + Math.min(520, primary.workArea.width * 0.48);
-  leader.y = primary.workArea.y + primary.workArea.height * 0.48;
-  leader.direction = direction;
-  const initialCursor = { x: leader.x + followAnchor.x * size, y: leader.y + followAnchor.y * size };
-  if (scenario === 'poop-chase') engine.togglePoopChase(initialCursor);
-  else engine.toggleCentipede(initialCursor);
-  const originCursor = { x: leader.x + followAnchor.x * size, y: leader.y + followAnchor.y * size };
-  const targetCursor = {
-    x: direction === 'left'
-      ? Math.max(primary.workArea.x + 140, originCursor.x - 360)
-      : Math.min(primary.workArea.x + primary.workArea.width - 140, originCursor.x + 360),
-    y: originCursor.y
-  };
+  let leader;
+  let originCursor;
+  let targetCursor;
+  let expectedPhrase = null;
+  let expectedOrder = [];
+  let recipientId = null;
+  let participantIds = [];
+  let excludedIds = [];
+  let skippedReason = null;
+
+  if (groupShout) {
+    stageGroupShoutScenario(primary);
+    expectedPhrase = scenario === 'dad-shout' ? behaviors.phrases.dad : behaviors.phrases.grandpa;
+    const shoutResult = scenario === 'dad-shout' ? engine.callDad() : engine.callGrandpa();
+    recipientId = shoutResult.recipientId;
+    participantIds = [...shoutResult.participantIds];
+    excludedIds = [...shoutResult.excludedIds];
+    skippedReason = shoutResult.skippedReason;
+    expectedOrder = [...participantIds];
+    leader = engine.pets.find((pet) => pet.id === participantIds[0]) || null;
+    originCursor = {
+      x: primary.workArea.x + primary.workArea.width / 2,
+      y: primary.workArea.y + primary.workArea.height / 2
+    };
+    targetCursor = { ...originCursor };
+  } else {
+    const poopParticipants = scenario === 'poop-chase' ? engine.poopChaseParticipants() : null;
+    leader = scenario === 'poop-chase' ? poopParticipants.leader : engine.pets[0];
+    const followers = scenario === 'poop-chase' ? poopParticipants.followers : engine.pets.slice(1);
+    if (!leader || !followers.length || (scenario === 'poop-chase' && !poopParticipants.settings.enabled)) return;
+    const rightHead = engine.anchorsFor(leader, 'right').head;
+    const leftHead = engine.anchorsFor(leader, 'left').head;
+    const followAnchor = { x: (rightHead[0] + leftHead[0]) / 2, y: (rightHead[1] + leftHead[1]) / 2 };
+    leader.x = primary.workArea.x + Math.min(520, primary.workArea.width * 0.48);
+    leader.y = primary.workArea.y + primary.workArea.height * 0.48;
+    leader.direction = direction;
+    const initialCursor = { x: leader.x + followAnchor.x * size, y: leader.y + followAnchor.y * size };
+    if (scenario === 'poop-chase') engine.togglePoopChase(initialCursor);
+    else engine.toggleCentipede(initialCursor);
+    originCursor = { x: leader.x + followAnchor.x * size, y: leader.y + followAnchor.y * size };
+    targetCursor = {
+      x: direction === 'left'
+        ? Math.max(primary.workArea.x + 140, originCursor.x - 360)
+        : Math.min(primary.workArea.x + primary.workArea.width - 140, originCursor.x + 360),
+      y: originCursor.y
+    };
+  }
+
   scenarioTest = {
     scenario,
-    leaderId: leader.id,
+    leaderId: leader?.id || null,
     startedAt: Date.now(),
     lastSampleAt: Number.NEGATIVE_INFINITY,
     direction,
     originCursor,
     targetCursor,
-    samples: []
+    expectedPhrase,
+    expectedOrder,
+    recipientId,
+    participantIds,
+    excludedIds,
+    skippedReason,
+    workArea: primary.workArea,
+    samples: [],
+    captures: [],
+    capturedLabels: new Set(),
+    capturePromises: []
   };
   const captureAtMs = Math.max(500, Number.parseInt(process.env.PET_SCENARIO_CAPTURE_AT_MS || '2500', 10));
-  if (process.env.PET_SCENARIO_CAPTURE_DIR) {
-    setTimeout(() => captureScenarioWindows().catch((error) => {
-      const outputDir = process.env.PET_SCENARIO_CAPTURE_DIR;
-      fs.mkdirSync(outputDir, { recursive: true });
-      fs.writeFileSync(path.join(outputDir, 'capture-error.txt'), `${publicErrorMessage(error)}\n`, 'utf8');
-    }), captureAtMs).unref();
+  if (!groupShout && process.env.PET_SCENARIO_CAPTURE_DIR) {
+    setTimeout(() => requestScenarioCapture(null), captureAtMs).unref();
   }
-  const durationMs = Math.max(3000, Number.parseInt(process.env.PET_SCENARIO_DURATION_MS || '6000', 10));
-  setTimeout(() => {
+  const fallbackDuration = groupShout ? 12000 : 6000;
+  const durationMs = Math.max(3000, Number.parseInt(process.env.PET_SCENARIO_DURATION_MS || String(fallbackDuration), 10));
+  setTimeout(async () => {
+    if (ticker) {
+      clearTimeout(ticker);
+      ticker = null;
+    }
+    await Promise.allSettled(scenarioTest?.capturePromises || []);
     const output = process.env.PET_SCENARIO_OUT;
     if (output) {
       fs.mkdirSync(path.dirname(output), { recursive: true });
-      fs.writeFileSync(output, `${JSON.stringify({ scenario, direction, originCursor, targetCursor, samples: scenarioTest?.samples || [] }, null, 2)}\n`, 'utf8');
+      const report = {
+        scenario,
+        direction,
+        originCursor,
+        targetCursor,
+        expectedPhrase,
+        expectedOrder,
+        recipientId,
+        participantIds,
+        excludedIds,
+        skippedReason,
+        captures: scenarioTest?.captures || [],
+        samples: scenarioTest?.samples || []
+      };
+      fs.writeFileSync(output, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
     }
     exitAutomatedTest();
   }, durationMs).unref();
@@ -362,6 +488,9 @@ function startScenarioTest() {
 
 function scenarioCursor() {
   if (!scenarioTest) return null;
+  if (scenarioTest.scenario === 'dad-shout' || scenarioTest.scenario === 'grandpa-shout') {
+    return { ...scenarioTest.targetCursor };
+  }
   const elapsed = (Date.now() - scenarioTest.startedAt) / 1000;
   const ratio = Math.min(1, elapsed / 1.2);
   return {
@@ -378,9 +507,29 @@ function recordScenarioSample(snapshot, cursor) {
   const leader = snapshot.pets.find((pet) => pet.id === scenarioTest.leaderId);
   scenarioTest.samples.push({
     elapsed: Number(elapsed.toFixed(3)),
+    phase: snapshot.shoutPhase || snapshot.mode,
     cursor: { x: Math.round(cursor.x), y: Math.round(cursor.y) },
-    leader: leader ? { x: Number(leader.x.toFixed(2)), y: Number(leader.y.toFixed(2)), vx: Number(leader.vx.toFixed(2)), direction: leader.direction, action: leader.action } : null,
-    pets: snapshot.pets.map((pet) => ({ id: pet.id, x: Number(pet.x.toFixed(2)), direction: pet.direction, action: pet.action })),
+    leader: leader ? {
+      x: Number(leader.x.toFixed(2)),
+      y: Number(leader.y.toFixed(2)),
+      vx: Number(leader.vx.toFixed(2)),
+      vy: Number(leader.vy.toFixed(2)),
+      direction: leader.direction,
+      action: leader.action,
+      frame: Number(leader.frame.toFixed(2)),
+      phrase: leader.phrase
+    } : null,
+    pets: snapshot.pets.map((pet) => ({
+      id: pet.id,
+      x: Number(pet.x.toFixed(2)),
+      y: Number(pet.y.toFixed(2)),
+      vx: Number(pet.vx.toFixed(2)),
+      vy: Number(pet.vy.toFixed(2)),
+      direction: pet.direction,
+      action: pet.action,
+      frame: Number(pet.frame.toFixed(2)),
+      phrase: pet.phrase
+    })),
     droppings: snapshot.droppings.map((dropping) => ({
       id: dropping.id,
       sourceId: dropping.sourceId,
@@ -397,35 +546,485 @@ function recordScenarioSample(snapshot, cursor) {
   });
 }
 
-async function captureScenarioWindows() {
+function requestScenarioCapture(label) {
+  if (!scenarioTest || !process.env.PET_SCENARIO_CAPTURE_DIR) return;
+  const key = label || 'active';
+  if (scenarioTest.capturedLabels.has(key)) return;
+  scenarioTest.capturedLabels.add(key);
+  const promise = new Promise((resolve) => setTimeout(resolve, 80))
+    .then(() => captureScenarioWindows(label))
+    .catch((error) => {
+      const outputDir = process.env.PET_SCENARIO_CAPTURE_DIR;
+      fs.mkdirSync(outputDir, { recursive: true });
+      fs.writeFileSync(path.join(outputDir, `capture-${key}-error.txt`), `${publicErrorMessage(error)}\n`, 'utf8');
+    });
+  scenarioTest.capturePromises.push(promise);
+}
+
+function captureScenarioMilestone(snapshot) {
+  if (!scenarioTest || !process.env.PET_SCENARIO_CAPTURE_DIR) return;
+  if (scenarioTest.scenario !== 'dad-shout' && scenarioTest.scenario !== 'grandpa-shout') return;
+  const elapsed = (Date.now() - scenarioTest.startedAt) / 1000;
+  if (snapshot.shoutPhase === 'forming') {
+    if (elapsed >= 0.5) requestScenarioCapture('forming-early');
+    if (elapsed >= 2.0) requestScenarioCapture('forming-late');
+    return;
+  }
+  if (snapshot.shoutPhase === 'kneeling') {
+    requestScenarioCapture('kneeling');
+    return;
+  }
+  if (snapshot.shoutPhase === 'shouting') {
+    const participant = snapshot.pets.find((pet) => scenarioTest.participantIds.includes(pet.id));
+    if (!participant) return;
+    const frame = Math.max(0, Math.min(2, Math.floor(participant.frame || 0)));
+    requestScenarioCapture(`shout-${frame}`);
+  }
+}
+
+function scenarioCompositionBounds(items, workArea) {
+  const margin = 48;
+  if (!items.length) return { ...workArea };
+  const minX = Math.max(workArea.x, Math.min(...items.map((item) => item.bounds.x)) - margin);
+  const minY = Math.max(workArea.y, Math.min(...items.map((item) => item.bounds.y)) - margin);
+  const maxX = Math.min(workArea.x + workArea.width, Math.max(...items.map((item) => item.bounds.x + item.bounds.width)) + margin);
+  const maxY = Math.min(workArea.y + workArea.height, Math.max(...items.map((item) => item.bounds.y + item.bounds.height)) + margin);
+  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+}
+
+function compositeScenarioImages(items, workArea) {
+  const width = Math.max(1, Math.round(workArea.width));
+  const height = Math.max(1, Math.round(workArea.height));
+  const bitmap = Buffer.alloc(width * height * 4);
+  for (let offset = 0; offset < bitmap.length; offset += 4) {
+    bitmap[offset] = 246;
+    bitmap[offset + 1] = 246;
+    bitmap[offset + 2] = 246;
+    bitmap[offset + 3] = 255;
+  }
+  for (const item of items) {
+    const source = item.image.toBitmap();
+    const sourceSize = item.image.getSize();
+    const offsetX = Math.round(item.bounds.x - workArea.x);
+    const offsetY = Math.round(item.bounds.y - workArea.y);
+    for (let y = 0; y < sourceSize.height; y += 1) {
+      const targetY = offsetY + y;
+      if (targetY < 0 || targetY >= height) continue;
+      for (let x = 0; x < sourceSize.width; x += 1) {
+        const targetX = offsetX + x;
+        if (targetX < 0 || targetX >= width) continue;
+        const sourceOffset = (y * sourceSize.width + x) * 4;
+        const alpha = source[sourceOffset + 3] / 255;
+        if (alpha <= 0) continue;
+        const targetOffset = (targetY * width + targetX) * 4;
+        const inverse = 1 - alpha;
+        bitmap[targetOffset] = Math.min(255, Math.round(source[sourceOffset] + bitmap[targetOffset] * inverse));
+        bitmap[targetOffset + 1] = Math.min(255, Math.round(source[sourceOffset + 1] + bitmap[targetOffset + 1] * inverse));
+        bitmap[targetOffset + 2] = Math.min(255, Math.round(source[sourceOffset + 2] + bitmap[targetOffset + 2] * inverse));
+      }
+    }
+  }
+  return nativeImage.createFromBitmap(bitmap, { width, height, scaleFactor: 1 }).toPNG();
+}
+
+async function captureScenarioWindows(label = null) {
   const outputDir = process.env.PET_SCENARIO_CAPTURE_DIR;
-  if (!outputDir) return;
-  fs.mkdirSync(outputDir, { recursive: true });
+  if (!outputDir || !scenarioTest) return;
+  const captureDir = label ? path.join(outputDir, label) : outputDir;
+  fs.mkdirSync(captureDir, { recursive: true });
   const frames = [];
+  const compositeItems = [];
   for (const [id, entry] of petWindows) {
     if (entry.win.isDestroyed()) continue;
     const image = await entry.win.webContents.capturePage();
     const file = `${id}.png`;
-    fs.writeFileSync(path.join(outputDir, file), image.toPNG());
-    frames.push({ id, file, bounds: entry.win.getBounds(), visible: entry.win.isVisible() });
+    const fullPath = path.join(captureDir, file);
+    fs.writeFileSync(fullPath, image.toPNG());
+    const bounds = entry.win.getBounds();
+    frames.push({
+      id,
+      file: path.relative(outputDir, fullPath).split(path.sep).join('/'),
+      bounds,
+      visible: entry.win.isVisible()
+    });
+    compositeItems.push({ image: fitCaptureToLogicalBounds(image, bounds), bounds });
   }
   const droppings = [];
   for (const [id, win] of [...droppingWindows]) {
     if (win.isDestroyed()) continue;
     const image = await win.webContents.capturePage();
     const file = `dropping-${id}.png`;
-    fs.writeFileSync(path.join(outputDir, file), image.toPNG());
-    droppings.push({ id, file, bounds: win.getBounds(), visible: win.isVisible() });
+    const fullPath = path.join(captureDir, file);
+    fs.writeFileSync(fullPath, image.toPNG());
+    const bounds = win.getBounds();
+    droppings.push({
+      id,
+      file: path.relative(outputDir, fullPath).split(path.sep).join('/'),
+      bounds,
+      visible: win.isVisible()
+    });
+    compositeItems.push({ image: fitCaptureToLogicalBounds(image, bounds), bounds });
   }
-  fs.writeFileSync(path.join(outputDir, 'manifest.json'), `${JSON.stringify({ direction: scenarioTest?.direction, capturedAt: Date.now(), frames, droppings }, null, 2)}\n`, 'utf8');
+  const compositionFile = label ? `${label}.png` : 'composition.png';
+  fs.writeFileSync(path.join(outputDir, compositionFile), compositeScenarioImages(compositeItems, scenarioCompositionBounds(compositeItems, scenarioTest.workArea)));
+  const capture = {
+    label: label || 'active',
+    phase: engine.snapshot().shoutPhase || engine.mode,
+    capturedAt: Date.now(),
+    composition: compositionFile,
+    frames,
+    droppings
+  };
+  scenarioTest.captures.push(capture);
+  fs.writeFileSync(path.join(outputDir, 'manifest.json'), `${JSON.stringify({
+    schemaVersion: 2,
+    scenario: scenarioTest.scenario,
+    direction: scenarioTest.direction,
+    captures: scenarioTest.captures
+  }, null, 2)}\n`, 'utf8');
 }
 
-function startTicker() {
-  ticker = setInterval(() => {
+function performanceDuration(name, fallback, minimum = 1000) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= minimum ? Math.round(value) : fallback;
+}
+
+function waitForPerformance(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function performanceCursor() {
+  if (!performanceAudit || !['centipede', 'poop-chase'].includes(performanceAudit.cursorMode)) return null;
+  const workArea = screen.getPrimaryDisplay().workArea;
+  const elapsed = (nodePerformance.now() - performanceAudit.cursorStartedAt) / 1000;
+  return {
+    x: workArea.x + workArea.width / 2 + Math.cos(elapsed * 0.9) * Math.min(320, workArea.width * 0.28),
+    y: workArea.y + workArea.height / 2 + Math.sin(elapsed * 0.7) * Math.min(140, workArea.height * 0.18)
+  };
+}
+
+function recordPerformanceTick(now) {
+  const phase = performanceAudit?.current;
+  if (!phase) return;
+  if (phase.lastTickAt !== null) phase.frameIntervalsMs.push(now - phase.lastTickAt);
+  phase.lastTickAt = now;
+}
+
+function effectRendererSnapshot() {
+  return [
+    ['cursor-poop', cursorPoopWindow],
+    ['dropping-poop', droppingPoopWindow]
+  ].flatMap(([role, win]) => {
+    if (!win || win.isDestroyed()) return [];
+    return [{ role, pid: win.webContents.getOSProcessId(), visible: win.isVisible() }];
+  });
+}
+
+function visibleEffectWindows() {
+  return effectRendererSnapshot().filter((entry) => entry.visible).length;
+}
+
+function performanceStateFingerprint() {
+  const snapshot = engine.snapshot();
+  return crypto.createHash('sha256').update(JSON.stringify({
+    mode: snapshot.mode,
+    pets: snapshot.pets.map(({ id, x, y, action, frame, phrase }) => ({ id, x: roundCoordinate(x), y: roundCoordinate(y), action, frame: Math.floor(frame), phrase })),
+    droppings: snapshot.droppings.map(({ id, sourceId, targetId, x, y }) => ({ id, sourceId, targetId, x: roundCoordinate(x), y: roundCoordinate(y) })),
+    effects: effectRendererSnapshot().map(({ role, pid, visible }) => ({ role, pid, visible }))
+  })).digest('hex');
+}
+
+function roundCoordinate(value) {
+  return Number(Number(value).toFixed(3));
+}
+
+function samplePerformanceMetrics() {
+  const phase = performanceAudit?.current;
+  if (!phase) return;
+  const now = nodePerformance.now();
+  const metrics = app.getAppMetrics();
+  const cpuPercent = metrics.reduce((sum, metric) => sum + (Number(metric.cpu?.percentCPUUsage) || 0), 0);
+  const workingSetMb = metrics.reduce((sum, metric) => sum + (Number(metric.memory?.workingSetSize) || 0), 0) / 1024;
+  const privateMemoryMb = metrics.reduce((sum, metric) => sum + (Number(metric.memory?.privateBytes) || 0), 0) / 1024;
+  phase.processSamples.push({
+    atMs: now - phase.startedAt,
+    cpuPercent,
+    workingSetMb,
+    privateMemoryMb,
+    processes: metrics.map((metric) => ({
+      pid: Number(metric.pid),
+      creationTime: Number(metric.creationTime),
+      type: metric.type,
+      serviceName: metric.serviceName,
+      name: metric.name
+    })),
+    effectRenderers: effectRendererSnapshot()
+  });
+  const eventLoopMaxMs = performanceAudit.eventLoop.max / 1e6;
+  if (Number.isFinite(eventLoopMaxMs)) phase.eventLoopDelaysMs.push(eventLoopMaxMs);
+  performanceAudit.eventLoop.reset();
+}
+
+function beginPerformancePhase(name) {
+  performanceAudit.eventLoop.reset();
+  performanceAudit.current = {
+    name,
+    startedAt: nodePerformance.now(),
+    lastTickAt: null,
+    frameIntervalsMs: [],
+    eventLoopDelaysMs: [],
+    processSamples: []
+  };
+  samplePerformanceMetrics();
+}
+
+function endPerformancePhase() {
+  if (!performanceAudit?.current) return null;
+  samplePerformanceMetrics();
+  const phase = performanceAudit.current;
+  performanceAudit.current = null;
+  const summary = summarizePerformancePhase({
+    durationMs: nodePerformance.now() - phase.startedAt,
+    frameIntervalsMs: phase.frameIntervalsMs,
+    eventLoopDelaysMs: phase.eventLoopDelaysMs,
+    processSamples: phase.processSamples
+  });
+  performanceAudit.phases[phase.name] = summary;
+  writePerformanceCheckpoint();
+  return summary;
+}
+
+async function waitForVisiblePetWindows() {
+  const deadline = nodePerformance.now() + 15000;
+  while (presentedPetIds.size < config.characters.length && nodePerformance.now() < deadline) {
+    await waitForPerformance(100);
+  }
+  if (presentedPetIds.size !== config.characters.length || performanceAudit.startupVisibleMs === null) {
+    throw new Error('Not every pet window reported a presented frame before the startup deadline.');
+  }
+}
+
+function performanceCenterCursor() {
+  const workArea = screen.getPrimaryDisplay().workArea;
+  return { x: workArea.x + workArea.width / 2, y: workArea.y + workArea.height / 2 };
+}
+
+function writePerformanceJson(report) {
+  fs.mkdirSync(path.dirname(performanceAudit.output), { recursive: true });
+  const temporary = `${performanceAudit.output}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  fs.rmSync(performanceAudit.output, { force: true });
+  fs.renameSync(temporary, performanceAudit.output);
+}
+
+function performanceReportBase(status) {
+  return {
+    schemaVersion: PERFORMANCE_REPORT_SCHEMA_VERSION,
+    fingerprintSchemaVersion: PERFORMANCE_FINGERPRINT_SCHEMA_VERSION,
+    generatedAt: new Date().toISOString(),
+    status,
+    platform: process.platform,
+    arch: process.arch,
+    runtime: performanceAudit.runtime,
+    metricSource: PERFORMANCE_METRIC_SOURCE,
+    runtimeFingerprint: performanceAudit.runtimeFingerprint,
+    thresholds: DEFAULT_PERFORMANCE_THRESHOLDS,
+    startupMeasurement: {
+      start: 'runner-before-executable-spawn',
+      end: 'all-pet-windows-presented'
+    },
+    startupVisibleMs: performanceAudit.startupVisibleMs,
+    expectedWindowCount: config.characters.length,
+    windowCount: presentedPetIds.size,
+    phases: performanceAudit.phases,
+    processLifecycle: summarizeProcessLifecycle(performanceAudit.phases)
+  };
+}
+
+function writePerformanceCheckpoint() {
+  if (!performanceAudit?.output) return;
+  writePerformanceJson(performanceReportBase('running'));
+}
+
+function stopSpecialModeForPerformance() {
+  if (engine.mode === 'centipede') {
+    const exitShout = behaviors.centipede.exitShout;
+    behaviors.centipede.exitShout = false;
+    engine.toggleCentipede(performanceCenterCursor());
+    behaviors.centipede.exitShout = exitShout;
+  } else if (engine.mode === 'poopChase') {
+    engine.togglePoopChase(performanceCenterCursor());
+  }
+}
+
+async function runTimedPerformancePhase(name, durationMs, enter) {
+  performanceAudit.cursorMode = name;
+  performanceAudit.cursorStartedAt = nodePerformance.now();
+  if (enter) enter();
+  await waitForPerformance(1000);
+  beginPerformancePhase(name);
+  await waitForPerformance(durationMs);
+  endPerformancePhase();
+  performanceAudit.cursorMode = null;
+}
+
+async function runShoutPerformancePhase(name, trigger) {
+  stopSpecialModeForPerformance();
+  if (engine.paused) engine.togglePause();
+  stageGroupShoutScenario(screen.getPrimaryDisplay());
+  beginPerformancePhase(name);
+  const result = trigger();
+  const deadline = nodePerformance.now() + performanceDuration('PET_PERF_SHOUT_TIMEOUT_MS', 20000);
+  while (result.started && engine.mode === 'shout' && nodePerformance.now() < deadline) {
+    await waitForPerformance(100);
+  }
+  endPerformancePhase();
+}
+
+async function runPerformanceAudit() {
+  try {
+    await waitForVisiblePetWindows();
+    engine.nextDadAt = Number.POSITIVE_INFINITY;
+    if (engine.paused) engine.togglePause();
+    stopSpecialModeForPerformance();
+
+    await runTimedPerformancePhase('idle', performanceDuration('PET_PERF_IDLE_MS', 60000), null);
+    stopSpecialModeForPerformance();
+
+    await runTimedPerformancePhase('centipede', performanceDuration('PET_PERF_CENTIPEDE_MS', 60000), () => {
+      engine.toggleCentipede(performanceCenterCursor());
+    });
+    stopSpecialModeForPerformance();
+
+    await runTimedPerformancePhase('poop-chase', performanceDuration('PET_PERF_POOP_CHASE_MS', 60000), () => {
+      engine.togglePoopChase(performanceCenterCursor());
+    });
+
+    const pauseContext = {
+      modeBeforePause: engine.mode,
+      visibleEffectWindows: visibleEffectWindows(),
+      effectRenderers: effectRendererSnapshot(),
+      stateFingerprintBefore: performanceStateFingerprint()
+    };
+    if (!engine.paused) togglePause();
+    pauseContext.modeDuringPause = engine.mode;
+    await waitForPerformance(1000);
+    beginPerformancePhase('pause');
+    await waitForPerformance(performanceDuration('PET_PERF_PAUSE_MS', 30000));
+    endPerformancePhase();
+    pauseContext.stateFingerprintAfter = performanceStateFingerprint();
+    if (engine.paused) togglePause();
+    stopSpecialModeForPerformance();
+
+    await runShoutPerformancePhase('dad-shout', () => engine.callDad());
+    await runShoutPerformancePhase('grandpa-shout', () => engine.callGrandpa());
+
+    await runTimedPerformancePhase('soak', performanceDuration('PET_PERF_SOAK_MS', 600000), null);
+
+    const activeCpu = performanceAudit.phases['poop-chase'].cpuPercent.average;
+    const pausedCpu = performanceAudit.phases.pause.cpuPercent.average;
+    const pauseRatio = activeCpu > 0 ? pausedCpu / activeCpu : null;
+    const activeTicker = performanceAudit.phases['poop-chase'].tickerUpdatesPerSecond;
+    const pausedTicker = performanceAudit.phases.pause.tickerUpdatesPerSecond;
+    const tickerRatio = activeTicker > 0 ? pausedTicker / activeTicker : null;
+    const soakMemory = performanceAudit.phases.soak.memoryMb;
+    const pauseComparison = {
+      activePhase: 'poop-chase',
+      activeAverageCpuPercent: activeCpu,
+      pausedAverageCpuPercent: pausedCpu,
+      ratio: Number.isFinite(pauseRatio) ? Number(pauseRatio.toFixed(3)) : null,
+      activeTickerUpdatesPerSecond: activeTicker,
+      pausedTickerUpdatesPerSecond: pausedTicker,
+      tickerRatio: Number.isFinite(tickerRatio) ? Number(tickerRatio.toFixed(3)) : null
+    };
+    const report = {
+      ...performanceReportBase('pending'),
+      startupVisibleMs: Number(performanceAudit.startupVisibleMs.toFixed(3)),
+      pauseContext,
+      soak: {
+        memoryGrowthMb: Number((soakMemory.end - soakMemory.start).toFixed(3)),
+        memoryGrowthMetric: 'private-bytes'
+      },
+      pauseComparison
+    };
+    const evaluation = evaluatePerformanceReport(report, DEFAULT_PERFORMANCE_THRESHOLDS, { expectedRuntimeFingerprint: performanceAudit.runtimeFingerprint });
+    report.status = evaluation.pass ? 'pass' : 'fail';
+    report.evaluation = evaluation;
+    writePerformanceJson(report);
+    exitAutomatedTest(evaluation.pass ? 0 : 2);
+  } catch (error) {
+    const report = {
+      schemaVersion: PERFORMANCE_REPORT_SCHEMA_VERSION,
+      fingerprintSchemaVersion: PERFORMANCE_FINGERPRINT_SCHEMA_VERSION,
+      generatedAt: new Date().toISOString(),
+      status: 'error',
+      error: publicErrorMessage(error),
+      partialReport: performanceAudit ? performanceReportBase('running') : null
+    };
+    if (performanceAudit?.output) {
+      writePerformanceJson(report);
+    }
+    exitAutomatedTest(2);
+  }
+}
+
+function startPerformanceAudit() {
+  if (process.env.PET_PERFORMANCE_TEST !== '1' || process.env.PET_SCENARIO_TEST) return;
+  const output = process.env.PET_PERFORMANCE_OUT;
+  if (!output) throw new Error('PET_PERFORMANCE_OUT is required for PET_PERFORMANCE_TEST.');
+  const launchStartedAtEpochMs = Number(process.env.PET_PERFORMANCE_LAUNCHED_AT_MS);
+  const executableSha256 = process.env.PET_PERFORMANCE_EXECUTABLE_SHA256;
+  if (!Number.isFinite(launchStartedAtEpochMs) || !/^[a-f0-9]{64}$/.test(executableSha256 || '')) {
+    throw new Error('Performance runner launch timestamp and executable SHA-256 are required.');
+  }
+  const eventLoop = monitorEventLoopDelay({ resolution: 10 });
+  eventLoop.enable();
+  performanceAudit = {
+    output,
+    launchStartedAtEpochMs,
+    startupVisibleMs: null,
+    runtimeFingerprint: runtimeFingerprintForProject(path.resolve(__dirname, '..')),
+    runtime: {
+      electronVersion: process.versions.electron,
+      executableSha256
+    },
+    phases: {},
+    current: null,
+    cursorMode: null,
+    cursorStartedAt: nodePerformance.now(),
+    eventLoop,
+    metricsTimer: null
+  };
+  performanceAudit.metricsTimer = setInterval(samplePerformanceMetrics, 1000);
+  runPerformanceAudit();
+}
+
+
+function scheduleTicker(delay) {
+  if (quitting) return;
+  const now = nodePerformance.now();
+  if (Number.isFinite(delay)) {
+    const boundedDelay = Math.max(0, delay);
+    tickerDeadline = now + boundedDelay;
+    ticker = setTimeout(runTickerFrame, boundedDelay);
+    return;
+  }
+  const schedule = nextTickerSchedule(engine.paused, tickerDeadline, now);
+  tickerDeadline = schedule.deadlineMs;
+  ticker = setTimeout(runTickerFrame, schedule.delayMs);
+}
+
+function runTickerFrame() {
+    ticker = null;
+    recordPerformanceTick(nodePerformance.now());
+    if (engine.paused) {
+      scheduleTicker();
+      return;
+    }
     const now = Date.now();
     const dt = Math.min(0.08, Math.max(0.001, (now - previousTick) / 1000));
     previousTick = now;
-    const cursor = scenarioCursor() || screen.getCursorScreenPoint();
+    const cursor = scenarioCursor() || performanceCursor() || screen.getCursorScreenPoint();
 
     for (const [id, drag] of dragStates) {
       const pet = engine.pets.find((item) => item.id === id);
@@ -441,8 +1040,27 @@ function startTicker() {
     snapshot.pets.forEach((pet) => {
       const entry = petWindows.get(pet.id);
       if (!entry || entry.win.isDestroyed()) return;
-      safeSetPosition(entry.win, pet.x - padding, pet.y - padding, `pet:${pet.id}`);
-      entry.win.webContents.send('pet:state', pet);
+      const nextBounds = {
+        x: Math.round(pet.x - padding),
+        y: Math.round(pet.y - padding),
+        width: config.render.windowSize,
+        height: config.render.windowSize
+      };
+      if (!entry.lastBounds || entry.lastBounds.x !== nextBounds.x || entry.lastBounds.y !== nextBounds.y) {
+        if (safeSetPosition(
+          entry.win,
+          nextBounds.x,
+          nextBounds.y,
+          `pet:${pet.id}`,
+          config.render.windowSize,
+          config.render.windowSize
+        )) entry.lastBounds = nextBounds;
+      }
+      const renderKey = petRenderKey(pet);
+      if (!entry.win.webContents.isLoading() && entry.lastRenderKey !== renderKey) {
+        entry.win.webContents.send('pet:state', pet);
+        entry.lastRenderKey = renderKey;
+      }
     });
 
     if (snapshot.mode === 'poopChase' && behaviors.prankEffects.enabled) {
@@ -452,15 +1070,23 @@ function startTicker() {
     }
 
     const showPoop = snapshot.mode === 'centipede' && behaviors.centipede.poopCursor && behaviors.prankEffects.enabled;
-    if (showPoop && cursorPoopWindow && !cursorPoopWindow.isDestroyed()) {
-      if (safeSetPosition(cursorPoopWindow, cursor.x + 10, cursor.y + 10, 'cursor-poop')) {
-        if (!cursorPoopWindow.isVisible()) cursorPoopWindow.showInactive();
-      } else if (cursorPoopWindow.isVisible()) cursorPoopWindow.hide();
-    } else if (cursorPoopWindow?.isVisible()) {
-      cursorPoopWindow.hide();
+    const poopWindow = showPoop ? ensureCursorPoopWindow() : cursorPoopWindow;
+    if (showPoop && poopWindow && !poopWindow.isDestroyed()) {
+      const cursorSize = Math.max(28, config.render.effectSize + 8);
+      if (safeSetPosition(poopWindow, cursor.x + 10, cursor.y + 10, 'cursor-poop', cursorSize, cursorSize)) {
+        if (!poopWindow.webContents.isLoading() && !poopWindow.isVisible()) poopWindow.showInactive();
+      } else if (poopWindow.isVisible()) poopWindow.hide();
+    } else if (poopWindow?.isVisible()) {
+      poopWindow.hide();
     }
     recordScenarioSample(snapshot, cursor);
-  }, 33);
+    captureScenarioMilestone(snapshot);
+    scheduleTicker();
+}
+
+function startTicker() {
+  previousTick = Date.now();
+  scheduleTicker(0);
 }
 
 function installIpc() {
@@ -482,6 +1108,15 @@ function installIpc() {
     if (entry.interactive === interactive) return;
     entry.interactive = interactive;
     setWindowInteractive(entry.win, interactive);
+  });
+
+  ipcMain.on('pet:presented', (event) => {
+    const authorized = petFromEvent(event);
+    if (!authorized) return;
+    presentedPetIds.add(authorized.id);
+    if (performanceAudit && performanceAudit.startupVisibleMs === null && presentedPetIds.size === config.characters.length) {
+      performanceAudit.startupVisibleMs = Date.now() - performanceAudit.launchStartedAtEpochMs;
+    }
   });
 
   ipcMain.on('pet:context-menu', (event) => {
@@ -554,10 +1189,9 @@ app.whenReady().then(() => {
   denySessionPermissions(session.defaultSession);
   if (process.platform === 'win32') app.setAppUserModelId(config.app.id);
   engine = new BehaviorEngine({ config, behaviors, manifest, displays: displays() });
+  startPerformanceAudit();
   installIpc();
   config.characters.forEach(createPetWindow);
-  createCursorPoopWindow();
-  createDroppingPoopWindow();
   createTray();
   registerShortcuts();
   startScenarioTest();
@@ -571,7 +1205,9 @@ app.whenReady().then(() => {
 app.on('before-quit', () => { quitting = true; });
 app.on('window-all-closed', () => { if (quitting) app.quit(); });
 app.on('will-quit', () => {
-  if (ticker) clearInterval(ticker);
+  if (ticker) clearTimeout(ticker);
+  if (performanceAudit?.metricsTimer) clearInterval(performanceAudit.metricsTimer);
+  performanceAudit?.eventLoop?.disable();
   clearDroppingWindows();
   globalShortcut.unregisterAll();
 });

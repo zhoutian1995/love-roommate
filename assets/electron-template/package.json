@@ -6,7 +6,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test tests/behavior-engine.test.mjs tests/performance-v2.test.mjs tests/config.test.mjs tests/security.test.mjs",
+    "test": "node --test tests/behavior-engine.test.mjs tests/performance-v2.test.mjs tests/performance-audit.test.mjs tests/config.test.mjs tests/security.test.mjs",
     "validate": "node tools/validate-project.mjs",
     "build:current": "node tools/package-current.mjs",
     "build:win": "node tools/package-current.mjs",

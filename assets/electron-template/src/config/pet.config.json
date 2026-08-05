@@ -20,7 +20,8 @@
   ],
   "selection": {
     "mode": "centipede",
-    "userCharacterId": null
+    "userCharacterId": null,
+    "prankExcludedCharacterIds": []
   },
   "packaging": {
     "windowsTarget": "portable",

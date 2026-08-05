@@ -48,6 +48,11 @@ if (config.packaging.macTarget !== 'dir' || config.packaging.macArch !== 'arm64'
 const selection = config.selection || {};
 if (!['normal', 'centipede', 'poop-relay', 'all'].includes(selection.mode)) errors.push('selection.mode must be normal, centipede, poop-relay, or all.');
 if (selection.userCharacterId !== null && !ids.includes(selection.userCharacterId)) errors.push('selection.userCharacterId must be null or a configured character id.');
+const prankExcludedIds = Array.isArray(selection.prankExcludedCharacterIds) ? selection.prankExcludedCharacterIds : [];
+if (!Array.isArray(selection.prankExcludedCharacterIds)) errors.push('selection.prankExcludedCharacterIds must be an array.');
+if (new Set(prankExcludedIds).size !== prankExcludedIds.length) errors.push('selection.prankExcludedCharacterIds must be unique.');
+for (const id of prankExcludedIds) if (!ids.includes(id)) errors.push(`Unknown prank-excluded character: ${id}.`);
+if (selection.userCharacterId !== null && !prankExcludedIds.includes(selection.userCharacterId)) errors.push('selection.userCharacterId must be included in selection.prankExcludedCharacterIds.');
 if (!behaviors.hotkeys?.dad || !behaviors.hotkeys?.grandpa || !behaviors.hotkeys?.centipede || !behaviors.hotkeys?.poopChase || !behaviors.hotkeys?.pause) errors.push('All default hotkeys must be configured.');
 
 const poopChase = behaviors.poopChase || {};
@@ -83,6 +88,7 @@ if (projectManifest) {
   if (declared.mode !== selection.mode || (declared.userCharacterId ?? null) !== (selection.userCharacterId ?? null)) {
     errors.push('project-manifest selection must match pet.config.json.');
   }
+  if (JSON.stringify(declared.prankExcludedCharacterIds || []) !== JSON.stringify(prankExcludedIds)) errors.push('project-manifest prankExcludedCharacterIds must match pet.config.json in order.');
   if ((declared.leaderId ?? null) !== (poopChase.enabled ? poopLeader : null)) errors.push('project-manifest leaderId must match behaviors.json.');
   if (JSON.stringify(declared.followerIds || []) !== JSON.stringify(poopChase.enabled ? poopFollowers : [])) errors.push('project-manifest followerIds must match behaviors.json in order.');
 }

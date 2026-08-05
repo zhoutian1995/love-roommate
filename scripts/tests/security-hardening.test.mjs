@@ -14,6 +14,14 @@ const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const scripts = path.join(skillRoot, 'scripts');
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+function syntheticWindowsPath(...segments) {
+  return ['C:', ...segments].join(path.win32.sep);
+}
+
+function syntheticUncPath(...segments) {
+  return `${path.win32.sep}${path.win32.sep}${segments.join(path.win32.sep)}`;
+}
+
 function pngFixture(label) {
   return Buffer.concat([PNG_SIGNATURE, Buffer.from(label, 'utf8')]);
 }
@@ -99,6 +107,7 @@ function createArgs(root, overrides = {}) {
     people: '3',
     mode: 'all',
     self: 'person-2',
+    'prank-excluded': 'person-3',
     consent: 'confirmed',
     leader: 'person-1',
     followers: 'person-2,person-3',
@@ -155,7 +164,10 @@ function setupDerivedActionFixture(t) {
 test('project creation validates consent and participants before writing output', (t) => {
   const cases = [
     { consent: null },
+    { 'prank-excluded': null },
     { self: 'person-9' },
+    { 'prank-excluded': 'person-3,person-3' },
+    { 'prank-excluded': 'person-9' },
     { leader: 'person-9' },
     { followers: 'person-2,person-2' },
     { followers: 'person-2,person-9' }
@@ -184,6 +196,7 @@ test('project creation writes a strict relative Manifest V2', (t) => {
     selection: {
       mode: 'all',
       userCharacterId: 'person-2',
+      prankExcludedCharacterIds: ['person-2', 'person-3'],
       leaderId: 'person-1',
       followerIds: ['person-2', 'person-3']
     },
@@ -191,6 +204,8 @@ test('project creation writes a strict relative Manifest V2', (t) => {
   });
   const text = fs.readFileSync(path.join(output, 'project-manifest.json'), 'utf8');
   assert.doesNotMatch(text, /sourcePhoto|createdAt|sha256|[A-Za-z]:[\\/]/);
+  const config = JSON.parse(fs.readFileSync(path.join(output, 'project', 'src', 'config', 'pet.config.json'), 'utf8'));
+  assert.deepEqual(config.selection.prankExcludedCharacterIds, ['person-2', 'person-3']);
 });
 
 test('image records use fixed workflow attestation and reject --model', (t) => {
@@ -866,7 +881,7 @@ test('V1 migration is explicit, redacts paths, and preserves dry-run behavior', 
     project,
     release: path.join(root, 'release'),
     preview,
-    sourcePhoto: { path: 'C:\\Users\\private\\roommates.jpg', sha256: 'secret', size: 123 },
+    sourcePhoto: { path: syntheticWindowsPath('Users', 'sample', 'roommates.jpg'), sha256: 'secret', size: 123 },
     createdAt: '2026-01-01T00:00:00.000Z',
     selection: { mode: 'normal', userCharacterId: null, leaderId: null, followerIds: [] }
   }, null, 2));
@@ -904,7 +919,7 @@ test('output privacy audit rejects host paths and unlisted raster files', (t) =>
     consent: { allSubjectsAuthorized: true }
   }, null, 2));
   fs.writeFileSync(path.join(sprites, 'manifest.json'), JSON.stringify({ schemaVersion: 1, characters: [] }, null, 2));
-  fs.writeFileSync(path.join(root, 'project', 'leak.json'), JSON.stringify({ path: 'C:\\Users\\private\\photo.png' }));
+  fs.writeFileSync(path.join(root, 'project', 'leak.json'), JSON.stringify({ path: syntheticWindowsPath('Users', 'sample', 'photo.png') }));
   fs.writeFileSync(path.join(root, 'project', 'unexpected.png'), 'synthetic bytes');
   fs.writeFileSync(path.join(root, 'project', 'unexpected.avif'), 'synthetic avif bytes');
   fs.writeFileSync(path.join(root, 'project', 'renamed-image.bin'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
@@ -933,13 +948,13 @@ test('output privacy audit accepts escaped relative Windows paths but rejects re
 
   const errorLog = path.join(root, 'preview', 'runtime-smoke-error.txt');
   fs.mkdirSync(path.dirname(errorLog), { recursive: true });
-  fs.writeFileSync(errorLog, 'Capture failed at C:\\Users\\private\\source.png\n');
+  fs.writeFileSync(errorLog, `Capture failed at ${syntheticWindowsPath('Users', 'sample', 'source.png')}\n`);
   const rejectedLog = run('audit_output_privacy.mjs', ['--root', root]);
   assert.notEqual(rejectedLog.status, 0);
   assert.match(rejectedLog.stderr, /absolute\/private path/);
   fs.rmSync(errorLog);
 
-  fs.writeFileSync(runtimeConfig, JSON.stringify({ ICD: { library_path: '\\\\server\\share\\vk_swiftshader.dll' } }));
+  fs.writeFileSync(runtimeConfig, JSON.stringify({ ICD: { library_path: syntheticUncPath('synthetic-host', 'share', 'vk_swiftshader.dll') } }));
   const rejected = run('audit_output_privacy.mjs', ['--root', root]);
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /absolute\/private path/);

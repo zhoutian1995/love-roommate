@@ -130,6 +130,11 @@ test('exiting centipede produces only grandpa phrase', () => {
   engine.toggleCentipede({ x: 600, y: 400 });
   engine.toggleCentipede({ x: 600, y: 400 });
   assert.equal(engine.mode, 'shout');
+  assert.equal(engine.snapshot().shoutPhase, 'forming');
+  assert.ok(engine.pets.every((pet) => pet.phrase === ''));
+  for (let frame = 0; frame < 600 && engine.snapshot().shoutPhase !== 'shouting'; frame += 1) {
+    engine.update(1 / 60, { x: 600, y: 400 });
+  }
   assert.ok(engine.pets.every((pet) => pet.phrase === behaviors.phrases.grandpa));
 });
 

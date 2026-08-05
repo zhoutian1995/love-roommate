@@ -68,6 +68,7 @@ const identityBoardPath = path.join(preview, 'identity-board.png');
 const contactSheetPath = path.join(preview, 'action-contact-sheet.png');
 const generationManifestPath = path.join(preview, 'generation-manifest.json');
 const identityQualityPath = path.join(preview, 'identity-quality-review.json');
+const scenarioRoot = path.join(preview, 'scenarios');
 const poopChase = behaviors.poopChase || {};
 const poopFollowers = Array.isArray(poopChase.followerIds) ? poopChase.followerIds : [];
 
@@ -142,6 +143,20 @@ function combinedHash(values) {
   const hash = crypto.createHash('sha256');
   for (const value of values.filter(Boolean)) hash.update(value);
   return hash.digest('hex');
+}
+
+function scenarioEvidenceFiles(root) {
+  if (!fs.existsSync(root)) return [];
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const current = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(current);
+      else if (entry.isFile()) files.push(current);
+    }
+  };
+  visit(root);
+  return files.sort((left, right) => left.localeCompare(right));
 }
 
 async function validateGenerationManifest() {
@@ -816,7 +831,11 @@ const characterFingerprints = Object.fromEntries(config.characters.map((characte
     ...[...new Set(characterFiles.get(character.id) || [])].sort().map(fileHash)
   ])
 ]));
-const runtimeFingerprint = runtimePath ? fileHash(runtimePath) : null;
+const scenarioEvidence = scenarioEvidenceFiles(scenarioRoot);
+const runtimeFingerprint = runtimePath ? combinedHash([
+  `runtime:${fileHash(runtimePath)}`,
+  ...scenarioEvidence.map((file) => `${portableRelative(outputRoot, file)}:${fileHash(file)}`)
+]) : null;
 const reviewExisted = fs.existsSync(reviewPath);
 if (!reviewExisted) writeJson(reviewPath, expectedReview(characterFingerprints, runtimeFingerprint));
 const review = readJson(reviewPath);
@@ -857,6 +876,7 @@ const report = {
     actionContactSheet: { path: portableRelative(outputRoot, contactSheetPath), fingerprint: contactSheetFingerprint },
     characters: characterFingerprints,
     runtimeWindow: runtimePath ? { path: runtimeRelative, fingerprint: runtimeFingerprint } : null,
+    scenarioEvidence: scenarioEvidence.map((file) => ({ path: portableRelative(outputRoot, file), fingerprint: fileHash(file) })),
     generationManifest: generationManifest ? { path: portableRelative(outputRoot, generationManifestPath), fingerprint: fileHash(generationManifestPath) } : null
     ,identityQualityReview: identityQuality ? { path: portableRelative(outputRoot, identityQualityPath), fingerprint: fileHash(identityQualityPath) } : null
   },

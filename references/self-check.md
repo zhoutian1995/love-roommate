@@ -28,7 +28,7 @@ Fail a character when any of these are visible:
 
 Fail runtime review when the pet is blank, clipped, too small to read, surrounded by an opaque rectangle, or rendered outside the transparent window as expected.
 
-Fail a scenario when a human-centipede mouth is detached from the previous rear, a special formation does not visibly follow the cursor, its fixed-row offsets break while moving, the relay leaves its row, more than one dropping appears, an eater does not become the next poop source, or kneeling shouts are not synchronized.
+Fail a scenario when a human-centipede mouth is detached from the previous rear, a special formation does not visibly follow the cursor, its fixed-row offsets break while moving, the relay leaves its row, more than one dropping appears, an eater does not become the next poop source, or kneeling shouts are not synchronized. Also fail dad/grandpa when the selected self is not visibly centered as the standing recipient, overlaps the row, kneels, shouts, receives a prank bubble, or when participants do not face that recipient.
 
 ## Repair rule
 

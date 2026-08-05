@@ -19,9 +19,12 @@
   "randomDad": {
     "enabled": true,
     "minDelayMs": 9000,
-    "maxDelayMs": 22000,
-    "groupChance": 0.28,
-    "durationMs": 1500
+    "maxDelayMs": 22000
+  },
+  "groupShout": {
+    "gatherSpeed": 180,
+    "kneelDelayMs": 350,
+    "frameDurationMs": 1400
   },
   "centipede": {
     "enabled": true,

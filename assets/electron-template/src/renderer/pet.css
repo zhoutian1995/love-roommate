@@ -55,6 +55,11 @@ body {
   animation: wobble 0.7s ease-in-out infinite alternate;
 }
 
+html.paused #effect,
+html.paused #bubble {
+  animation-play-state: paused;
+}
+
 #bubble {
   display: none;
   position: absolute;
