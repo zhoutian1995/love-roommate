@@ -10,20 +10,32 @@ Replace placeholders with paths returned by `codex_app__load_workspace_dependenc
 
 ## Record and process images
 
+Before recording an action, remove its flat background with the system image helper using hard border-key removal (`--auto-key border --tolerance 24 --edge-contract 1`). Do not use `--soft-matte` or global `--despill` for photorealistic people. Then run:
+
+```text
+"<codex-node>" "<skill>/scripts/cleanup_portrait_chroma.mjs" --input "<transparent-action.png>" --out "<clean-transparent-action.png>" --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>" --key "<#selected-key>"
+```
+
+The clean transparent file is the one to record and pass to `process_action_sprite.mjs`. White-background generation is permitted only when white does not collide with the subject; the final file must still be transparent and halo-free.
+
 ```text
 "<codex-node>" "<skill>/scripts/record_image_generation.mjs" --preview "<output root>/preview" --file "<identity-board.png>" --kind identity
-"<codex-node>" "<skill>/scripts/record_image_generation.mjs" --preview "<output root>/preview" --file "<sheet.png>" --kind base --character person-1
-"<codex-node>" "<skill>/scripts/record_image_generation.mjs" --preview "<output root>/preview" --file "<role-sheet.png>" --kind role --character person-1 --role leader
-"<codex-node>" "<skill>/scripts/process_sprites.mjs" --project "<output root>/project" --sheet "<sheet.png>" --character person-1 --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>"
-"<codex-node>" "<skill>/scripts/process_role_sprites.mjs" --project "<output root>/project" --sheet "<role-sheet.png>" --character person-1 --role leader --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>"
+"<codex-node>" "<skill>/scripts/record_image_generation.mjs" --preview "<output root>/preview" --file "<person-1-master.png>" --kind master --character person-1 --prompt-version identity-v1 --version 1
+"<codex-node>" "<skill>/scripts/record_image_generation.mjs" --preview "<output root>/preview" --file "<person-1-crawl-right-1.png>" --kind action --character person-1 --action crawl_right_1 --master-fingerprint "<approved-master-sha256>" --prompt-version action-v1 --version 1
+"<codex-node>" "<skill>/scripts/process_action_sprite.mjs" --project "<output root>/project" --file "<person-1-crawl-right-1.png>" --character person-1 --action crawl_right_1 --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>"
 ```
 
 `record_image_generation.mjs` intentionally has no `--model` option. It records the fixed `codex-imagegen` / `gpt-image-2` / `workflow-attested` policy and hashes the file.
+
+Repeat the `action` record and `process_action_sprite.mjs` commands for every required action. Every action record must use the fingerprint of that character's approved master. Use `--supersedes`, `--reason`, and an incremented `--version` when replacing a failed generation. Do not use the legacy multi-action `base` / `role` sheet commands for new V2 artwork; they remain available only for explicit legacy recovery.
+
+Required actions per character are `crawl_right_1`, `crawl_right_2`, `crawl_left_1`, `crawl_left_2`, `idle_right`, `idle_left`, `centipede_right`, `centipede_left`, `kneel_shout_1`, `kneel_shout_2`, `kneel_shout_3`, `drag`, `poop_right`, `poop_left`, `eat_right`, and `eat_left`.
 
 ## Review and validate
 
 ```text
 "<codex-node>" "<skill>/scripts/make_contact_sheet.mjs" --project "<output root>/project" --out "<output root>/preview/action-contact-sheet.png" --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>"
+"<codex-node>" "<skill>/scripts/create_identity_review.mjs" --project "<output root>/project" --preview "<output root>/preview"
 "<codex-node>" "<skill>/scripts/validate_project.mjs" --project "<output root>/project" --source "<photo>" --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>"
 "<codex-node>" "<skill>/scripts/self_check_project.mjs" --project "<output root>/project" --preview "<output root>/preview" --pnpm "<codex-pnpm>" --node-modules "<codex-node-modules>"
 "<codex-node>" "<skill>/scripts/audit_output_privacy.mjs" --root "<output root>" --source "<photo>"

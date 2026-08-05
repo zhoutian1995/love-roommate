@@ -27,8 +27,9 @@ jobs:
       - run: pip install --no-cache-dir pyyaml==6.0.2
       - run: npm install --global pnpm@11.9.0 --registry=https://registry.npmjs.org && pnpm --version
       - run: python -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/openai/skills/49f948faa9258a0c61caceaf225e179651397431/skills/.system/skill-creator/scripts/quick_validate.py', 'quick_validate.py')"
-      - run: node --test assets/electron-template/tests/behavior-engine.test.mjs assets/electron-template/tests/config.test.mjs assets/electron-template/tests/security.test.mjs
-      - run: node --test scripts/tests/security-hardening.test.mjs scripts/tests/runtime-security.test.mjs
+      - run: node --test assets/electron-template/tests/behavior-engine.test.mjs assets/electron-template/tests/performance-v2.test.mjs assets/electron-template/tests/config.test.mjs assets/electron-template/tests/security.test.mjs
+      - run: node --test scripts/tests/security-hardening.test.mjs scripts/tests/runtime-security.test.mjs scripts/tests/release-policy.test.mjs
+      - run: node scripts/audit_skill_release.mjs
       - env:
           OFFICIAL_VALIDATOR_PATH: quick_validate.py
         run: node scripts/release_check.mjs

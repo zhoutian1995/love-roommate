@@ -20,9 +20,9 @@
 - `phrases.dad`, `phrases.grandpa`: dynamic bubble strings.
 - `hotkeys`: Electron accelerators. Failure to register a shortcut must not stop startup.
 - `randomDad.enabled`, `minDelayMs`, `maxDelayMs`, `groupChance`, `durationMs`.
-- `centipede.enabled`, `maxSpeed`, `followStrength`, `gap`, `poopCursor`, `flies`, `slime`, `exitShout`.
+- `centipede.enabled`, `maxSpeed`, `followStrength`, `connectionTolerance`, `flies`, and `exitShout`. The connected row keeps its fixed shape while moving as one unit toward the cursor.
 - `poopChase.enabled`, `leaderId`, ordered `followerIds`, `maxSpeed`, `followStrength`, `deadZone`, `gap`, `initialDropDelayMs`, `dropVisibleBeforeEatMs`, `poopDurationMs`, `eatRadius`, `eatDurationMs`, `consumedDelayMs`, `roundResetDelayMs`, `droppingTtlMs`, `poopSize`, and `stinkSize`.
-- `poopChase.maxDroppings`: fixed at `1` in v1. The relay is `leader -> follower 1 -> ... -> tail drop -> reset`; a follower must finish eating before becoming the next source.
+- `poopChase.maxDroppings`: fixed at `1`. The relay is `leader poops -> next person eats -> that eater poops -> ... -> tail poops -> reset`.
 - `freeRoam.speedMin`, `speedMax`, `turnIntervalMs`.
 - `prankEffects.enabled`: master switch for poop, flies, slime, and stink visuals.
 
@@ -31,10 +31,9 @@
 Each character entry contains:
 
 - `id`: matches `pet.config.json`.
-- `frames`: arrays for `crawl_right`, `crawl_left`, `idle_right`, `idle_left`, `centipede_right`, `centipede_left`, `shout`, and `drag`.
-- When poop chase is enabled, its leader also requires `poop_right` and `poop_left`; every follower requires `eat_right` and `eat_left`.
-- `anchors.right.head` / `anchors.right.rear`: normalized `[x,y]` points for right-facing centipede frames.
-- `anchors.left.head` / `anchors.left.rear`: mirrored normalized points for left-facing frames.
+- `frames`: arrays for crawl, idle, centipede, `kneel_shout_1/2/3`, drag, eat, and poop actions.
+- Every relay participant requires `poop_right/left` and `eat_right/left`.
+- `anchors.<direction>.mouth` and `anchors.<direction>.rear`: normalized connection points used to form the human centipede.
 
 Paths are relative to `src/assets/sprites/`. Do not use absolute paths or reference the source photo.
 

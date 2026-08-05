@@ -109,8 +109,13 @@ for (const id of ids) {
       uniqueFiles.add(relative);
     }
   }
-  const roleGroups = poopChase.enabled
-    ? id === poopLeader ? ['poop_right', 'poop_left'] : poopFollowers.includes(id) ? ['eat_right', 'eat_left'] : []
+  const expectedShoutFrames = [1, 2, 3].map((frame) => `${id}/shout_${frame}.png`);
+  if (JSON.stringify(entry.frames?.shout || []) !== JSON.stringify(expectedShoutFrames)) {
+    errors.push(`${id} shout must contain exactly shout_1.png, shout_2.png, and shout_3.png in order.`);
+  }
+  const relayParticipants = new Set([poopLeader, ...poopFollowers].filter(Boolean));
+  const roleGroups = poopChase.enabled && relayParticipants.has(id)
+    ? ['poop_right', 'poop_left', 'eat_right', 'eat_left']
     : [];
   for (const group of roleGroups) {
     if (!Array.isArray(entry.frames?.[group]) || !entry.frames[group].length) {
@@ -124,9 +129,10 @@ for (const id of ids) {
   }
   for (const direction of ['right', 'left']) {
     const head = entry.anchors?.[direction]?.head;
+    const mouth = entry.anchors?.[direction]?.mouth;
     const rear = entry.anchors?.[direction]?.rear;
-    if (![head, rear].every((point) => Array.isArray(point) && point.length === 2 && point.every((value) => value >= 0 && value <= 1))) {
-      errors.push(`${id} has invalid ${direction} head/rear anchors.`);
+    if (![head, mouth, rear].every((point) => Array.isArray(point) && point.length === 2 && point.every((value) => value >= 0 && value <= 1))) {
+      errors.push(`${id} has invalid ${direction} head/mouth/rear anchors.`);
     } else if (Math.abs(head[0] - rear[0]) < 0.4) {
       errors.push(`${id} ${direction} head and rear anchors are too close.`);
     }

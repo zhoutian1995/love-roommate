@@ -28,8 +28,8 @@ Fail a character when any of these are visible:
 
 Fail runtime review when the pet is blank, clipped, too small to read, surrounded by an opaque rectangle, or rendered outside the transparent window as expected.
 
-Fail a scenario when the leader or formation does not follow the simulated cursor, bodies disconnect or overlap incoherently, the dropping disappears, more than one dropping appears, a follower stands to poop, or the next dropping appears before the current follower finishes eating.
+Fail a scenario when a human-centipede mouth is detached from the previous rear, a special formation does not visibly follow the cursor, its fixed-row offsets break while moving, the relay leaves its row, more than one dropping appears, an eater does not become the next poop source, or kneeling shouts are not synchronized.
 
 ## Repair rule
 
-Require `status: pass` and score 85 or higher. On failure, follow `recommendedActions`, regenerate only the named character sheet, rerun sprite processing and the contact sheet, inspect the new artifacts, update the review, and rerun self-check. Never lower the score threshold to make an artifact pass.
+Require `status: pass`, project score 90 or higher, every identity score 90 or higher, and identity similarity at least 31/35. Regenerate only the failed person/action from the approved master. Never lower thresholds to force a pass.

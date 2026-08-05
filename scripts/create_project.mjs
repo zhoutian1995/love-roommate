@@ -67,7 +67,7 @@ try {
   fs.mkdirSync(release, { recursive: true });
   fs.mkdirSync(path.join(preview, 'sources'), { recursive: true });
   writeJson(path.join(preview, 'generation-manifest.json'), {
-    schemaVersion: 2,
+    schemaVersion: 3,
     provenancePolicy: {
       generator: 'codex-imagegen',
       declaredModelPolicy: 'gpt-image-2',

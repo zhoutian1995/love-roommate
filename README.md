@@ -42,7 +42,9 @@
 
 安装完成后，新建一个 Codex 任务或重启 Codex，使 `$love-roommate` 出现在可用 Skill 列表中。
 
-### 使用 Skill Installer 脚本
+### 高级安装：直接运行 Skill Installer 脚本
+
+普通用户不需要执行这一节。仅在你明确需要脚本化安装、并且本机已经有可用 Python 时使用。
 
 Windows PowerShell：
 
@@ -56,7 +58,9 @@ macOS：
 python3 "$HOME/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py" --repo zhoutian1995/love-roommate --path . --name love-roommate
 ```
 
-### 手动安装
+### 开发者安装：使用 Git
+
+普通用户不需要安装 Git。这个方式适合需要查看源码、参与开发或调试安装过程的人。
 
 Windows PowerShell：
 
@@ -204,8 +208,8 @@ Manifest V1 可能保存原图指纹或本机路径，因此不会被静默放�
 在仓库根目录运行：
 
 ```powershell
-node --test assets/electron-template/tests/behavior-engine.test.mjs assets/electron-template/tests/config.test.mjs assets/electron-template/tests/security.test.mjs
-node --test scripts/tests/security-hardening.test.mjs scripts/tests/runtime-security.test.mjs
+node --test assets/electron-template/tests/behavior-engine.test.mjs assets/electron-template/tests/performance-v2.test.mjs assets/electron-template/tests/config.test.mjs assets/electron-template/tests/security.test.mjs
+node --test scripts/tests/security-hardening.test.mjs scripts/tests/runtime-security.test.mjs scripts/tests/release-policy.test.mjs
 node scripts/release_check.mjs
 node scripts/audit_skill_release.mjs
 python "$HOME\.codex\skills\.system\skill-creator\scripts\quick_validate.py" .
@@ -216,7 +220,7 @@ python "$HOME\.codex\skills\.system\skill-creator\scripts\quick_validate.py" .
 - 行为测试全部通过。
 - 隐私审计不包含任何人物位图或生成目录。
 - Skill 官方校验通过。
-- 用户项目自检状态为 `pass`，总分不低于 85。
+- 用户项目自检状态为 `pass`，总分不低于 90。
 - 人工实际打开身份板、动作总览和运行场景图，而不是对着 JSON 发挥想象力。
 
 ## 免责声明

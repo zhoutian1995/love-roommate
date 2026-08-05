@@ -98,6 +98,33 @@ test('centipede followers remain separated and inside work area', () => {
   }
 });
 
+test('centipede follows the cursor while preserving its connected row', () => {
+  const engine = fixture(5);
+  engine.toggleCentipede({ x: 600, y: 400 });
+  const before = engine.pets.map((pet) => ({ x: pet.x, y: pet.y }));
+  const leader = engine.pets[0];
+  const rightHead = engine.anchorsFor(leader, 'right').head;
+  const leftHead = engine.anchorsFor(leader, 'left').head;
+  const size = engine.config.render.spriteSize;
+  const cursor = {
+    x: leader.x + (rightHead[0] + leftHead[0]) / 2 * size + 360,
+    y: leader.y + (rightHead[1] + leftHead[1]) / 2 * size
+  };
+
+  for (let frame = 0; frame < 120; frame += 1) engine.update(1 / 60, cursor);
+
+  const movedX = leader.x - before[0].x;
+  const movedY = leader.y - before[0].y;
+  assert.ok(Math.hypot(movedX, movedY) >= 40, 'leader must visibly follow the cursor');
+  for (let index = 1; index < engine.pets.length; index += 1) {
+    assert.ok(Math.abs((engine.pets[index].x - before[index].x) - movedX) < 0.01, `pet ${index} must keep the fixed row offset`);
+    assert.ok(Math.abs((engine.pets[index].y - before[index].y) - movedY) < 0.01, `pet ${index} must keep the fixed row height`);
+    const rear = engine.anchorPoint(engine.pets[index - 1], 'rear');
+    const mouth = engine.anchorPoint(engine.pets[index], 'mouth');
+    assert.ok(Math.hypot(rear.x - mouth.x, rear.y - mouth.y) <= 10, `connection ${index} is not touching`);
+  }
+});
+
 test('exiting centipede produces only grandpa phrase', () => {
   const engine = fixture(5);
   engine.toggleCentipede({ x: 600, y: 400 });
@@ -132,7 +159,7 @@ test('poop chase uses configured leader and follower order', () => {
   assert.equal(engine.droppings[0].sourceId, 'person-3');
   assert.equal(engine.droppings[0].targetId, 'person-1');
   const followers = ['person-1', 'person-2', 'person-4', 'person-5'].map((id) => engine.pets.find((pet) => pet.id === id));
-  followers.forEach((pet) => assert.equal(pet.action, 'centipede_right'));
+  followers.forEach((pet) => assert.equal(pet.action, 'eat_right'));
 });
 
 test('each follower eats before passing a new dropping to the next person', () => {
@@ -146,11 +173,12 @@ test('each follower eats before passing a new dropping to the next person', () =
     assert.equal(engine.droppings[0].sourceId, expectedSources[index]);
     assert.equal(engine.droppings[0].targetId, expectedTargets[index]);
     const currentId = engine.droppings[0].id;
-    engine.droppings[0].approachedTarget = true;
+    assert.equal(engine.droppings[0].approachedTarget, true, 'the next eater must begin within the configured eat radius');
     engine.update(0.65, leaderCursor(engine));
     assert.deepEqual(engine.droppings[0].eatenBy, [expectedTargets[index]]);
     assert.equal(engine.droppings[0].id, currentId);
     engine.update(0.42, leaderCursor(engine));
+    if (index < expectedTargets.length - 1) assert.equal(engine.pets.find((pet) => pet.id === expectedTargets[index]).action, 'poop_right');
   }
   assert.equal(engine.poopRelay.phase, 'tailDrop');
   assert.equal(engine.droppings[0].sourceId, 'person-5');
@@ -161,17 +189,23 @@ test('each follower eats before passing a new dropping to the next person', () =
   assert.equal(engine.droppings[0].targetId, 'person-1');
 });
 
-test('poop chase keeps one dropping and follows the cursor', () => {
+test('poop chase follows the cursor while keeping one dropping and a fixed row', () => {
   const engine = poopFixture();
   engine.togglePoopChase({ x: 900, y: 320 });
   const before = engine.pets.map((pet) => ({ id: pet.id, x: pet.x, y: pet.y }));
+  const leaderBefore = before.find((pet) => pet.id === 'person-3');
   for (let frame = 0; frame < 240; frame += 1) {
     engine.update(1 / 60, { x: 1080, y: 300 });
     assert.equal(engine.droppings.length, 1);
   }
+  const leader = engine.pets.find((pet) => pet.id === 'person-3');
+  const movedX = leader.x - leaderBefore.x;
+  const movedY = leader.y - leaderBefore.y;
+  assert.ok(Math.hypot(movedX, movedY) >= 40, 'relay leader must visibly follow the cursor');
   for (const original of before) {
     const pet = engine.pets.find((item) => item.id === original.id);
-    assert.ok(Math.hypot(pet.x - original.x, pet.y - original.y) > 40, `${pet.id} should follow the cursor`);
+    assert.ok(Math.abs((pet.x - original.x) - movedX) < 0.01, `${pet.id} must keep the fixed row offset`);
+    assert.ok(Math.abs((pet.y - original.y) - movedY) < 0.01, `${pet.id} must keep the fixed row height`);
   }
 });
 

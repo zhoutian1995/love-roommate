@@ -47,6 +47,7 @@ if (fs.existsSync(generationPath)) {
       kind: entry.kind,
       characterId: entry.characterId || null,
       role: entry.role || null,
+      origin: 'generated',
       generator: 'codex-imagegen',
       declaredModelPolicy: 'gpt-image-2',
       evidenceLevel: 'workflow-attested',
@@ -57,7 +58,7 @@ if (fs.existsSync(generationPath)) {
   changes.push({
     file: portableRelative(root, generationPath),
     value: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       provenancePolicy: {
         generator: 'codex-imagegen',
         declaredModelPolicy: 'gpt-image-2',

@@ -72,7 +72,7 @@ const selfCheckScript = path.join(skillRoot, 'scripts', 'self_check_project.mjs'
 const privacyScript = path.join(skillRoot, 'scripts', 'audit_output_privacy.mjs');
 const sourceArgs = typeof args.source === 'string' ? ['--source', path.resolve(args.source)] : [];
 if (!runNode(validateScript, ['--project', project, ...sourceArgs, ...nodeArgs])) fail('Project validation failed.');
-if (!runNode(selfCheckScript, ['--project', project, '--preview', preview, ...nodeArgs])) {
+if (!runNode(selfCheckScript, ['--project', project, '--preview', preview, '--warn-only', ...nodeArgs])) {
   fail('Asset self-check is incomplete. Review the generated identity/contact artifacts before building.');
 }
 

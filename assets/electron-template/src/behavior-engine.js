@@ -49,6 +49,7 @@ class BehaviorEngine {
     this.lastDropAt = Number.NEGATIVE_INFINITY;
     this.lastDropPoint = null;
     this.poopRelay = null;
+    this.shoutStartedAt = 0;
     this.nextTurnAt = 0;
     this.nextDadAt = this.randomDadDelay();
     this.pets = config.characters.map((character, index) => this.createPet(character, index));
@@ -239,29 +240,84 @@ class BehaviorEngine {
 
   callDad(group = true) {
     this.interruptFormation();
-    const duration = this.behaviors.randomDad.durationMs / 1000;
+    const duration = 4.2;
     const targets = group ? this.pets : [this.pets[Math.floor(this.random() * this.pets.length)]];
+    if (group) this.arrangeKneelingRow(targets);
     targets.forEach((pet) => {
       pet.phrase = this.behaviors.phrases.dad;
       pet.phraseUntil = this.elapsed + duration;
-      pet.action = 'shout';
+      pet.action = group ? 'kneel_shout_1' : 'shout';
     });
     if (group) {
       this.mode = 'shout';
+      this.shoutStartedAt = this.elapsed;
       this.modeUntil = this.elapsed + duration;
     }
   }
 
   callGrandpa() {
     this.interruptFormation();
-    const duration = this.behaviors.randomDad.durationMs / 1000;
+    const duration = 4.2;
+    this.arrangeKneelingRow(this.pets);
     this.pets.forEach((pet) => {
       pet.phrase = this.behaviors.phrases.grandpa;
       pet.phraseUntil = this.elapsed + duration;
-      pet.action = 'shout';
+      pet.action = 'kneel_shout_1';
     });
     this.mode = 'shout';
+    this.shoutStartedAt = this.elapsed;
     this.modeUntil = this.elapsed + duration;
+  }
+
+  arrangeKneelingRow(participants, display = null) {
+    if (!participants.length) return;
+    const size = this.config.render.spriteSize;
+    const activeDisplay = display || this.getDisplayForPoint({ x: participants[0].x + size / 2, y: participants[0].y + size / 2 });
+    const gap = Math.max(8, size * 0.08);
+    const totalWidth = participants.length * size + (participants.length - 1) * gap;
+    const left = activeDisplay.workArea.x + Math.max(0, (activeDisplay.workArea.width - totalWidth) / 2);
+    const top = activeDisplay.workArea.y + activeDisplay.workArea.height - size - Math.max(24, size * 0.22);
+    participants.forEach((pet, index) => {
+      pet.x = left + index * (size + gap);
+      pet.y = top;
+      pet.vx = 0;
+      pet.vy = 0;
+      pet.direction = 'right';
+      pet.dragging = false;
+    });
+  }
+
+  arrangeCentipedeRow(participants, display = null) {
+    if (!participants.length) return;
+    const size = this.config.render.spriteSize;
+    const activeDisplay = display || this.getDisplayForPoint({ x: participants[0].x + size / 2, y: participants[0].y + size / 2 });
+    participants.forEach((pet) => {
+      pet.direction = 'right';
+      pet.vx = 0;
+      pet.vy = 0;
+      pet.dragging = false;
+    });
+    participants[0].x = 0;
+    participants[0].y = 0;
+    for (let index = 1; index < participants.length; index += 1) {
+      const previous = participants[index - 1];
+      const pet = participants[index];
+      const rear = this.anchorPoint(previous, 'rear');
+      const mouth = this.anchorsFor(pet, 'right').mouth || this.anchorsFor(pet, 'right').head;
+      pet.x = rear.x - mouth[0] * size;
+      pet.y = rear.y - mouth[1] * size;
+    }
+    const minX = Math.min(...participants.map((pet) => pet.x));
+    const maxX = Math.max(...participants.map((pet) => pet.x + size));
+    const minY = Math.min(...participants.map((pet) => pet.y));
+    const maxY = Math.max(...participants.map((pet) => pet.y + size));
+    const dx = activeDisplay.workArea.x + Math.max(0, (activeDisplay.workArea.width - (maxX - minX)) / 2) - minX;
+    const dy = activeDisplay.workArea.y + activeDisplay.workArea.height - (maxY - minY) - Math.max(24, size * 0.22) - minY;
+    participants.forEach((pet) => {
+      pet.x += dx;
+      pet.y += dy;
+      pet.action = 'centipede_right';
+    });
   }
 
   toggleCentipede(cursor = null) {
@@ -275,11 +331,8 @@ class BehaviorEngine {
 
     this.clearFormation();
     this.mode = 'centipede';
-    const leader = this.pets[0];
-    const size = this.config.render.spriteSize;
-    const target = cursor || { x: leader.x + size, y: leader.y + size / 2 };
-    leader.direction = target.x >= leader.x + size / 2 ? 'right' : 'left';
-    this.initializeTrail(leader, this.pets.length);
+    const display = this.getDisplayForPoint(cursor || this.pets[0]);
+    this.arrangeCentipedeRow(this.pets, display);
     return this.mode;
   }
 
@@ -313,7 +366,6 @@ class BehaviorEngine {
     leader.y = display.workArea.y + display.workArea.height - size - Math.max(28, size * 0.25);
     leader.direction = 'right';
     this.arrangePoopChaseRow([leader, ...followers], settings, display);
-    this.initializeTrail(leader, followers.length + 1);
     this.poopRelay = { sourceIndex: 0, phase: 'waitingDrop', phaseUntil: this.elapsed };
     this.createRelayDropping(settings, [leader, ...followers]);
     return this.mode;
@@ -375,6 +427,9 @@ class BehaviorEngine {
           pet.phrase = '';
           pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
         });
+      } else {
+        const frame = Math.min(3, Math.floor((this.elapsed - this.shoutStartedAt) / 1.4) + 1);
+        this.pets.forEach((pet) => { pet.action = `kneel_shout_${frame}`; });
       }
       this.sanitizeState();
       return this.snapshot();
@@ -490,30 +545,30 @@ class BehaviorEngine {
   }
 
   updateCentipede(dt, cursor) {
-    const size = this.config.render.spriteSize;
     const settings = this.behaviors.centipede;
     const leader = this.pets[0];
-    this.moveLeaderToward(leader, cursor, { ...settings, dt });
-    leader.action = leader.direction === 'right' ? 'centipede_right' : 'centipede_left';
-    leader.effect = settings.slime && this.behaviors.prankEffects.enabled ? 'slime' : '';
-
-    const { anchors } = this.updateTrailFromLeader(leader);
-    const headRearLength = Math.abs(anchors.head[0] - anchors.rear[0]) * size;
-    const stride = Math.max(size * 0.52, headRearLength) + settings.gap;
-    this.trimTrail(stride * Math.max(1, this.pets.length) + 220);
-
-    for (let index = 1; index < this.pets.length; index += 1) {
+    if (!leader) return;
+    const size = this.config.render.spriteSize;
+    const before = this.pets.map((pet) => ({ x: pet.x, y: pet.y }));
+    const display = this.getDisplayForPoint({ x: leader.x + size / 2, y: leader.y + size / 2 });
+    const movement = this.moveLeaderToward(leader, cursor, { ...settings, dt });
+    const minX = Math.min(...before.map((pet) => pet.x));
+    const maxX = Math.max(...before.map((pet) => pet.x + size));
+    const minY = Math.min(...before.map((pet) => pet.y));
+    const maxY = Math.max(...before.map((pet) => pet.y + size));
+    const movedX = clamp(movement.movedX, display.workArea.x - minX, display.workArea.x + display.workArea.width - maxX);
+    const movedY = clamp(movement.movedY, display.workArea.y - minY, display.workArea.y + display.workArea.height - maxY);
+    for (let index = 0; index < this.pets.length; index += 1) {
       const pet = this.pets[index];
-      const target = sampleTrail(this.trail, settings.gap + (index - 1) * stride);
-      pet.direction = target.direction;
-      const petAnchors = this.anchorsFor(pet);
-      pet.x = target.x - petAnchors.head[0] * size;
-      pet.y = target.y - petAnchors.head[1] * size;
-      pet.action = pet.direction === 'right' ? 'centipede_right' : 'centipede_left';
+      pet.x = before[index].x + movedX;
+      pet.y = before[index].y + movedY;
+      pet.vx = dt > 0 ? movedX / dt : 0;
+      pet.vy = dt > 0 ? movedY / dt : 0;
+      pet.direction = 'right';
+      pet.action = 'centipede_right';
       pet.effect = index === this.pets.length - 1 && settings.flies && this.behaviors.prankEffects.enabled ? 'flies' : '';
       pet.effectSize = this.config.render.effectSize;
       pet.dragging = false;
-      this.clampPet(pet);
     }
   }
 
@@ -525,24 +580,27 @@ class BehaviorEngine {
       return;
     }
 
-    this.moveLeaderToward(leader, cursor, { ...settings, dt });
     const size = this.config.render.spriteSize;
-    const { anchors } = this.updateTrailFromLeader(leader);
-    const headRearLength = Math.abs(anchors.head[0] - anchors.rear[0]) * size;
-    const stride = Math.max(size * 0.52, headRearLength) + settings.gap;
-    this.trimTrail(stride * Math.max(1, participants.length) + 220);
-
-    for (let index = 0; index < followers.length; index += 1) {
-      const pet = followers[index];
-      const target = sampleTrail(this.trail, settings.gap + index * stride);
-      pet.direction = target.direction;
-      const petAnchors = this.anchorsFor(pet);
-      pet.x = target.x - petAnchors.head[0] * size;
-      pet.y = target.y - petAnchors.head[1] * size;
-      pet.vx = 0;
-      pet.vy = 0;
-      pet.dragging = false;
-      this.clampPet(pet);
+    const before = new Map(participants.map((pet) => [pet.id, { x: pet.x, y: pet.y }]));
+    const display = this.getDisplayForPoint({ x: leader.x + size / 2, y: leader.y + size / 2 });
+    const movement = this.moveLeaderToward(leader, cursor, { ...settings, dt });
+    const minX = Math.min(...participants.map((pet) => before.get(pet.id).x));
+    const maxX = Math.max(...participants.map((pet) => before.get(pet.id).x + size));
+    const minY = Math.min(...participants.map((pet) => before.get(pet.id).y));
+    const maxY = Math.max(...participants.map((pet) => before.get(pet.id).y + size));
+    const movedX = clamp(movement.movedX, display.workArea.x - minX, display.workArea.x + display.workArea.width - maxX);
+    const movedY = clamp(movement.movedY, display.workArea.y - minY, display.workArea.y + display.workArea.height - maxY);
+    for (const pet of participants) {
+      const original = before.get(pet.id);
+      pet.x = original.x + movedX;
+      pet.y = original.y + movedY;
+      pet.vx = dt > 0 ? movedX / dt : 0;
+      pet.vy = dt > 0 ? movedY / dt : 0;
+      pet.direction = leader.direction;
+    }
+    for (const dropping of this.droppings) {
+      dropping.x += movedX;
+      dropping.y += movedY;
     }
 
     const participantIds = new Set([leader.id, ...followers.map((pet) => pet.id)]);
@@ -553,14 +611,10 @@ class BehaviorEngine {
     }
 
     this.updatePoopRelay(settings, participants);
-    leader.action = `poop_${leader.direction}`;
-    leader.effect = '';
-    leader.effectSize = this.config.render.effectSize;
-    leader.dragging = false;
-
-    for (const pet of followers) {
+    const activeSource = participants[this.poopRelay?.sourceIndex || 0];
+    for (const pet of participants) {
       const eating = this.elapsed < pet.eatUntil;
-      pet.action = eating ? `eat_${pet.direction}` : `centipede_${pet.direction}`;
+      pet.action = eating ? `eat_${pet.direction}` : (pet.id === activeSource?.id ? `poop_${pet.direction}` : `eat_${pet.direction}`);
       pet.effect = eating && this.behaviors.prankEffects.enabled ? 'stink' : '';
       pet.effectSize = eating ? settings.stinkSize : this.config.render.effectSize;
       pet.dragging = false;
@@ -570,7 +624,8 @@ class BehaviorEngine {
   anchorPoint(pet, kind) {
     const size = this.config.render.spriteSize;
     const anchors = this.anchorsFor(pet);
-    return { x: pet.x + anchors[kind][0] * size, y: pet.y + anchors[kind][1] * size };
+    const anchor = anchors[kind] || (kind === 'mouth' ? anchors.head : null);
+    return { x: pet.x + anchor[0] * size, y: pet.y + anchor[1] * size };
   }
 
   createRelayDropping(settings, participants) {

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { applyCodexRuntimeArgs, fail, loadSharp, parseArgs, readJson, writeJson } from './lib/common.mjs';
-import { alphaBounds } from './lib/sprite-processing.mjs';
+import { alphaBounds, nearestVisibleAlphaDistance } from './lib/sprite-processing.mjs';
 import { portableRelative, sanitizePersistedValue } from './lib/privacy.mjs';
 
 const args = parseArgs(process.argv.slice(2));
@@ -30,7 +30,7 @@ const behaviorsPath = path.join(project, 'src', 'config', 'behaviors.json');
 const manifestPath = path.join(project, 'src', 'assets', 'sprites', 'manifest.json');
 if (!fs.existsSync(configPath) || !fs.existsSync(behaviorsPath) || !fs.existsSync(manifestPath)) fail(`Not a generated desktop-pet project: ${project}`);
 
-const minScore = Number.parseInt(args['min-score'] || '85', 10);
+const minScore = Number.parseInt(args['min-score'] || '90', 10);
 if (!Number.isInteger(minScore) || minScore < 1 || minScore > 100) fail('--min-score must be an integer from 1 to 100.');
 
 const config = readJson(configPath);
@@ -67,6 +67,7 @@ const characterFiles = new Map(config.characters.map((character) => [character.i
 const identityBoardPath = path.join(preview, 'identity-board.png');
 const contactSheetPath = path.join(preview, 'action-contact-sheet.png');
 const generationManifestPath = path.join(preview, 'generation-manifest.json');
+const identityQualityPath = path.join(preview, 'identity-quality-review.json');
 const poopChase = behaviors.poopChase || {};
 const poopFollowers = Array.isArray(poopChase.followerIds) ? poopChase.followerIds : [];
 
@@ -81,6 +82,45 @@ function requiredCharacterChecks(characterId) {
 function addIssue(severity, code, message, recommendation, details = {}, penalty) {
   const defaultPenalty = severity === 'error' ? 18 : severity === 'warning' ? 5 : 0;
   issues.push({ severity, code, message, recommendation, penalty: penalty ?? defaultPenalty, ...details });
+}
+
+function validateIdentityQuality() {
+  if (!fs.existsSync(identityQualityPath)) {
+    addIssue('error', 'missing-identity-quality-review', 'Missing identity-quality-review.json.', 'Compare the source photo, identity masters, and action board; then complete the 100-point identity review.', {}, 30);
+    return null;
+  }
+  const data = readJson(identityQualityPath);
+  const weights = {
+    identitySimilarity: 35,
+    crossActionConsistency: 20,
+    clothingAndAccessories: 15,
+    ageSkinBody: 10,
+    photorealStyleConsistency: 10,
+    bodyEdgesReadability: 10
+  };
+  if (data.schemaVersion !== 1 || !Array.isArray(data.characters)) {
+    addIssue('error', 'invalid-identity-quality-review', 'identity-quality-review.json has an invalid schema.', 'Regenerate the identity review template and score every person.', {}, 30);
+    return data;
+  }
+  for (const character of config.characters) {
+    const review = data.characters.find((item) => item.id === character.id);
+    if (!review) {
+      addIssue('error', 'missing-identity-score', `Missing identity score for ${character.id}.`, 'Score this person against the original photo and approved master.', { characterId: character.id }, 25);
+      continue;
+    }
+    let total = 0;
+    let invalid = false;
+    for (const [key, max] of Object.entries(weights)) {
+      const value = review.scores?.[key];
+      if (!Number.isFinite(value) || value < 0 || value > max) invalid = true;
+      else total += value;
+    }
+    const blockers = Array.isArray(review.blockers) ? review.blockers.filter(Boolean) : [];
+    if (invalid || total < 90 || review.scores?.identitySimilarity < 31 || blockers.length || review.status !== 'pass') {
+      addIssue('error', 'identity-quality-failed', `${character.id} identity review failed (${total}/100).`, 'Regenerate only the failed master/action from the original photo and approved master; do not lower thresholds.', { characterId: character.id, total, blockers }, 25);
+    }
+  }
+  return data;
 }
 
 function median(values) {
@@ -104,12 +144,12 @@ function combinedHash(values) {
   return hash.digest('hex');
 }
 
-function validateGenerationManifest() {
+async function validateGenerationManifest() {
   if (!fs.existsSync(generationManifestPath)) return null;
   const data = readJson(generationManifestPath);
   const policy = data.provenancePolicy || {};
   if (
-    data.schemaVersion !== 2 ||
+    ![2, 3].includes(data.schemaVersion) ||
     policy.generator !== 'codex-imagegen' ||
     policy.declaredModelPolicy !== 'gpt-image-2' ||
     policy.evidenceLevel !== 'workflow-attested' ||
@@ -119,29 +159,90 @@ function validateGenerationManifest() {
     return data;
   }
   const required = [{ kind: 'identity', characterId: null, role: null }];
-  for (const character of config.characters) required.push({ kind: 'base', characterId: character.id, role: null });
-  if (poopChase.enabled) {
-    required.push({ kind: 'role', characterId: poopChase.leaderId, role: 'leader' });
-    for (const characterId of poopFollowers) required.push({ kind: 'role', characterId, role: 'follower' });
+  const actionNames = [
+    'crawl_right_1', 'crawl_right_2', 'crawl_left_1', 'crawl_left_2',
+    'idle_right', 'idle_left', 'centipede_right', 'centipede_left',
+    'kneel_shout_1', 'kneel_shout_2', 'kneel_shout_3', 'drag',
+    'poop_right', 'poop_left', 'eat_right', 'eat_left'
+  ];
+  const allowedActions = new Set(actionNames);
+  const horizontalFlipPairs = new Map([
+    ['crawl_right_1', 'crawl_left_1'], ['crawl_left_1', 'crawl_right_1'],
+    ['crawl_right_2', 'crawl_left_2'], ['crawl_left_2', 'crawl_right_2'],
+    ['idle_right', 'idle_left'], ['idle_left', 'idle_right'],
+    ['centipede_right', 'centipede_left'], ['centipede_left', 'centipede_right'],
+    ['poop_right', 'poop_left'], ['poop_left', 'poop_right'],
+    ['eat_right', 'eat_left'], ['eat_left', 'eat_right']
+  ]);
+  const history = Array.isArray(data.history) ? data.history : [];
+  if (data.history !== undefined && !Array.isArray(data.history)) {
+    addIssue('error', 'generation-history-schema', 'Generation manifest history must be an array.', 'Record the affected generated assets again with the current recorder.', {}, 20);
+  }
+  for (const entry of data.assets) {
+    if (entry.kind === 'action' && !allowedActions.has(entry.action)) {
+      addIssue('error', 'unsupported-generation-action', `Generation manifest contains unsupported action ${entry.action}.`, 'Remove the unsupported record and generate only documented actions.', { action: entry.action }, 20);
+    }
+    if (data.schemaVersion === 3 && entry.kind === 'action' && !['generated', 'derived'].includes(entry.origin)) {
+      addIssue('error', 'missing-action-origin', `Generation manifest action ${entry.action} has no valid origin.`, 'Record the action again as generated or derived.', { action: entry.action }, 20);
+    }
+  }
+  for (const character of config.characters) {
+    required.push({ kind: 'master', characterId: character.id, role: null, action: null });
+    for (const action of actionNames) required.push({ kind: 'action', characterId: character.id, role: null, action });
   }
   for (const expected of required) {
     const entry = data.assets.find((item) =>
       item.kind === expected.kind &&
       (item.characterId || null) === expected.characterId &&
-      (item.role || null) === expected.role
+      (item.role || null) === expected.role &&
+      (item.action || null) === (expected.action || null)
     );
-    const label = [expected.kind, expected.characterId, expected.role].filter(Boolean).join(':');
+    const label = [expected.kind, expected.characterId, expected.role, expected.action].filter(Boolean).join(':');
     if (!entry) {
       addIssue('error', 'missing-image-generation-attestation', `Missing GPT Image 2 workflow record for ${label}.`, 'Generate the final artwork with Codex image generation and record it with record_image_generation.mjs.', { asset: label }, 20);
       continue;
     }
-    if (
+    const origin = data.schemaVersion === 2 ? 'generated' : (entry.origin || 'generated');
+    if (origin === 'generated' && (
       entry.generator !== 'codex-imagegen' ||
       entry.declaredModelPolicy !== 'gpt-image-2' ||
       entry.evidenceLevel !== 'workflow-attested'
-    ) {
+    )) {
       addIssue('error', 'invalid-image-generation-attestation', `${label} has an incomplete workflow attestation.`, 'Record the current Codex image-generation output again.', { asset: label }, 25);
       continue;
+    }
+    if (origin === 'derived' && (entry.generator || entry.declaredModelPolicy || entry.evidenceLevel || entry.promptVersion)) {
+      addIssue('error', 'mixed-derived-attestation', `${label} mixes derived lineage with native generation attestation.`, 'Record the derived action without native generation fields.', { asset: label }, 25);
+    }
+    if (expected.kind === 'action' && (!entry.masterFingerprint || (origin === 'generated' && !entry.promptVersion) || !Number.isInteger(entry.version))) {
+      addIssue('error', 'missing-action-lineage', `${label} is missing master fingerprint or version lineage.`, 'Record the action again with its approved master fingerprint, prompt version, and generation version.', { asset: label }, 20);
+    }
+    if (expected.kind === 'master' && (!entry.promptVersion || !Number.isInteger(entry.version))) {
+      addIssue('error', 'missing-master-lineage', `${label} is missing prompt or version lineage.`, 'Record the approved master again with its prompt version and generation version.', { asset: label }, 20);
+    }
+    if (expected.kind === 'action') {
+      const master = data.assets.find((item) => item.kind === 'master' && item.characterId === expected.characterId);
+      if (!master?.sha256 || entry.masterFingerprint !== master.sha256) {
+        addIssue('error', 'master-fingerprint-mismatch', `${label} does not reference the current approved master.`, 'Regenerate or record the action with the exact approved master fingerprint.', { asset: label }, 25);
+      }
+    }
+    if ((expected.kind === 'master' || expected.kind === 'action') && Number.isInteger(entry.version)) {
+      const chain = [...history.filter((item) => item.key === entry.key), entry]
+        .sort((left, right) => Number(left.version || 0) - Number(right.version || 0));
+      let validChain = chain.length === entry.version;
+      for (let index = 0; index < chain.length; index += 1) {
+        const item = chain[index];
+        if (item.version !== index + 1) validChain = false;
+        if (index === 0) {
+          if (item.supersedes || item.replacementReason) validChain = false;
+        } else {
+          const prior = chain[index - 1];
+          if (item.supersedes !== prior.file || !String(item.replacementReason || '').trim()) validChain = false;
+        }
+      }
+      if (!validChain) {
+        addIssue('error', 'invalid-generation-replacement-chain', `${label} has an incomplete or non-monotonic replacement chain.`, 'Record replacements sequentially and preserve each superseded same-key record.', { asset: label, version: entry.version }, 25);
+      }
     }
     let file;
     try {
@@ -159,6 +260,62 @@ function validateGenerationManifest() {
     const currentHash = fileHash(file);
     if (currentHash !== entry.sha256) {
       addIssue('error', 'stale-generation-attestation', `The recorded source changed after its workflow attestation for ${label}.`, 'Record the current image-generation output again before processing and review.', { asset: label, file: entry.file }, 20);
+    }
+    if (expected.kind === 'action' && origin === 'derived') {
+      const source = data.assets.find((item) => item.kind === 'action' && item.characterId === expected.characterId && item.action === entry.sourceAction);
+      const sourceOrigin = source ? (data.schemaVersion === 2 ? 'generated' : (source.origin || 'generated')) : null;
+      if (
+        entry.transform !== 'horizontal-flip' ||
+        horizontalFlipPairs.get(entry.sourceAction) !== entry.action ||
+        !source ||
+        sourceOrigin !== 'generated' ||
+        source.file !== entry.sourceFile ||
+        source.sha256 !== entry.sourceSha
+      ) {
+        addIssue('error', 'invalid-derived-lineage', `${label} has an invalid source action, character, transform, or derived chain.`, 'Record the derived action from a same-character generated left/right counterpart.', { asset: label }, 25);
+        continue;
+      }
+      if (entry.derivedSha !== entry.sha256 || currentHash !== entry.derivedSha) {
+        addIssue('error', 'stale-derived-action', `${label} changed after its derived lineage was recorded.`, 'Recreate the deterministic horizontal flip and record it again.', { asset: label, file: entry.file }, 25);
+        continue;
+      }
+      let sourceFile;
+      try {
+        sourceFile = path.resolve(outputRoot, entry.sourceFile || '');
+        const sourceRelative = portableRelative(outputRoot, sourceFile, 'Derived source');
+        if (!sourceRelative.startsWith('preview/')) throw new Error('Derived source must remain inside preview/.');
+      } catch {
+        addIssue('error', 'invalid-derived-lineage', `${label} has an unsafe derived source path.`, 'Store and record the generated source inside preview/.', { asset: label }, 25);
+        continue;
+      }
+      if (!fs.existsSync(sourceFile) || fileHash(sourceFile) !== entry.sourceSha) {
+        addIssue('error', 'stale-derived-source', `${label} references a missing or changed generated source.`, 'Restore the attested generated source before recreating the flip.', { asset: label, sourceFile: entry.sourceFile }, 25);
+        continue;
+      }
+      try {
+        const [sourceRaw, derivedRaw] = await Promise.all([
+          sharp(sourceFile).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
+          sharp(file).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+        ]);
+        let matches = sourceRaw.info.width === derivedRaw.info.width && sourceRaw.info.height === derivedRaw.info.height && sourceRaw.info.channels === 4 && derivedRaw.info.channels === 4;
+        const width = sourceRaw.info.width;
+        const height = sourceRaw.info.height;
+        for (let y = 0; y < height && matches; y += 1) {
+          for (let x = 0; x < width && matches; x += 1) {
+            const sourceOffset = (y * width + (width - 1 - x)) * 4;
+            const derivedOffset = (y * width + x) * 4;
+            for (let channel = 0; channel < 4; channel += 1) {
+              if (sourceRaw.data[sourceOffset + channel] !== derivedRaw.data[derivedOffset + channel]) {
+                matches = false;
+                break;
+              }
+            }
+          }
+        }
+        if (!matches) addIssue('error', 'derived-pixel-mismatch', `${label} is not the deterministic horizontal flip of its source.`, 'Recreate the flip without edits, scaling, recompression, or color changes.', { asset: label }, 25);
+      } catch (error) {
+        addIssue('error', 'derived-pixel-mismatch', `${label} could not be decoded and compared with its source.`, 'Restore valid PNG files and recreate the deterministic flip.', { asset: label, detail: error.message }, 25);
+      }
     }
   }
   return data;
@@ -301,7 +458,8 @@ function processingKey(characterId, action) {
 }
 
 const uniqueFrames = new Map();
-const generationManifest = validateGenerationManifest();
+const generationManifest = await validateGenerationManifest();
+const identityQuality = validateIdentityQuality();
 const expectedFrameCounts = {
   crawl_right: 2,
   crawl_left: 2,
@@ -336,6 +494,17 @@ for (const character of config.characters) {
       );
     }
   }
+  const expectedShoutFrames = [1, 2, 3].map((frame) => `${character.id}/shout_${frame}.png`);
+  if (JSON.stringify(entry.frames?.shout || []) !== JSON.stringify(expectedShoutFrames)) {
+    addIssue(
+      'error',
+      'invalid-kneel-shout-runtime-mapping',
+      `${character.id} shout frames do not map exactly to shout_1.png, shout_2.png, and shout_3.png in order.`,
+      `Process kneel_shout_1, kneel_shout_2, and kneel_shout_3 again for ${character.id}.`,
+      { characterId: character.id, actual: entry.frames?.shout || [], expected: expectedShoutFrames },
+      20
+    );
+  }
   const roleGroups = poopChase.enabled
     ? character.id === poopChase.leaderId
       ? ['poop_right', 'poop_left']
@@ -367,9 +536,20 @@ for (const character of config.characters) {
   for (const direction of ['right', 'left']) {
     const anchors = entry.anchors?.[direction];
     const head = anchors?.head;
+    const mouth = anchors?.mouth;
     const rear = anchors?.rear;
-    if (!head || !rear) continue;
-    const correctOrder = direction === 'right' ? head[0] > rear[0] : head[0] < rear[0];
+    if (!head || !mouth || !rear) {
+      addIssue(
+        'error',
+        'missing-centipede-anchors',
+        `${character.id} ${direction} is missing explicit head, mouth, or rear anchors.`,
+        `Reprocess ${character.id}'s centipede_${direction} sprite with explicit mouth and rear anchors.`,
+        { characterId: character.id, direction },
+        18
+      );
+      continue;
+    }
+    const correctOrder = direction === 'right' ? mouth[0] > rear[0] : mouth[0] < rear[0];
     if (!correctOrder) {
       addIssue(
         'error',
@@ -526,6 +706,35 @@ for (const [relative, usages] of uniqueFrames) {
 for (const character of config.characters) {
   const entry = manifest.characters.find((item) => item.id === character.id);
   if (!entry) continue;
+  for (const direction of ['right', 'left']) {
+    const relative = entry.frames?.[`centipede_${direction}`]?.[0];
+    const pixels = relative ? frameBuffers.get(relative) : null;
+    if (!pixels) continue;
+    const anchors = entry.anchors?.[direction];
+    if (!anchors?.head || !anchors?.mouth || !anchors?.rear) continue;
+    const maximumDistance = Math.max(4, config.render.spriteSize * 0.1);
+    for (const label of ['head', 'mouth', 'rear']) {
+      let distance = Number.POSITIVE_INFINITY;
+      try {
+        distance = nearestVisibleAlphaDistance(pixels, config.render.spriteSize, config.render.spriteSize, anchors[label]);
+      } catch {}
+      if (!Number.isFinite(distance) || distance > maximumDistance) {
+        addIssue(
+          'error',
+          'detached-centipede-anchor',
+          `${character.id} ${direction} ${label} anchor is detached from visible alpha.`,
+          `Reprocess ${character.id}'s centipede_${direction} sprite with ${label} placed on the visible subject.`,
+          { characterId: character.id, direction, anchor: label, distance: round(distance) },
+          18
+        );
+      }
+    }
+  }
+}
+
+for (const character of config.characters) {
+  const entry = manifest.characters.find((item) => item.id === character.id);
+  if (!entry) continue;
   for (const group of ['crawl_right', 'crawl_left', 'shout']) {
     const frames = entry.frames?.[group] || [];
     if (frames.length < 2) continue;
@@ -649,6 +858,7 @@ const report = {
     characters: characterFingerprints,
     runtimeWindow: runtimePath ? { path: runtimeRelative, fingerprint: runtimeFingerprint } : null,
     generationManifest: generationManifest ? { path: portableRelative(outputRoot, generationManifestPath), fingerprint: fileHash(generationManifestPath) } : null
+    ,identityQualityReview: identityQuality ? { path: portableRelative(outputRoot, identityQualityPath), fingerprint: fileHash(identityQualityPath) } : null
   },
   issues: persistedIssues,
   recommendedActions,

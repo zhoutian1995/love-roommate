@@ -12,15 +12,20 @@
         "centipede_right": ["placeholder.svg"],
         "centipede_left": ["placeholder.svg"],
         "shout": ["placeholder.svg"],
+        "kneel_shout_1": ["placeholder.svg"],
+        "kneel_shout_2": ["placeholder.svg"],
+        "kneel_shout_3": ["placeholder.svg"],
         "drag": ["placeholder.svg"]
       },
       "anchors": {
         "right": {
           "head": [0.82, 0.38],
+          "mouth": [0.82, 0.38],
           "rear": [0.18, 0.62]
         },
         "left": {
           "head": [0.18, 0.38],
+          "mouth": [0.18, 0.38],
           "rear": [0.82, 0.62]
         }
       }

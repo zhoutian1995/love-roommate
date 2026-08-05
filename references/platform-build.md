@@ -23,10 +23,11 @@ Never treat a Windows-produced macOS directory as a verified `.app`. Preserve th
 ## Runtime acceptance
 
 - Keep every character inside the nearest display work area and away from the taskbar or Dock.
-- Follow the cursor across displays without assuming coordinates start at zero.
+- Choose the display containing the cursor when a special performance begins, keep the fixed-row shape inside that display's work area, and move the whole formation toward the cursor.
 - Keep the decorative poop cursor, dropped poop, and stink effects permanently click-through.
 - Right-click the visible character to open recovery controls; clicks outside opaque pixels must reach the underlying app.
 - Verify poop relay and ordinary centipede are mutually exclusive, pause freezes both people and the current dropping, and exiting relay mode hides the persistent dropped-effect window.
-- Verify the full selected formation follows the mouse, relay mode keeps exactly one dropping, each follower remains kneeling, and a new dropping appears only after the current follower finishes eating.
+- Verify every human-centipede mouth touches the previous rear. Verify relay keeps exactly one dropping and every eater becomes the next poop source only after eating finishes.
+- Verify dad and grandpa commands gather everyone into one kneeling row, play three synchronized shout beats, and return to free mode.
 - Use tray Pause and Quit as recovery controls.
 - On centipede exit, show only the configured grandpa phrase when `exitShout` is enabled.

@@ -28,14 +28,29 @@ if ((selection.mode === 'poop-relay' || selection.mode === 'all') !== Boolean(po
 if ((selection.mode === 'centipede' || selection.mode === 'all') !== Boolean(behaviors.centipede?.enabled)) errors.push('Selected mode and centipede configuration disagree.');
 if (poopChase.maxDroppings !== 1) errors.push('Poop relay must keep exactly one dropping.');
 
+const baseGroups = [
+  'crawl_right', 'crawl_left', 'idle_right', 'idle_left',
+  'centipede_right', 'centipede_left',
+  'kneel_shout_1', 'kneel_shout_2', 'kneel_shout_3', 'drag'
+];
+const relayParticipants = new Set(poopChase.enabled ? [poopChase.leaderId, ...poopFollowers] : []);
+
 for (const id of ids) {
   const entry = manifest.characters.find((item) => item.id === id);
   if (!entry) { errors.push(`Missing manifest entry: ${id}`); continue; }
-  const requiredRoleGroups = poopChase.enabled
-    ? id === poopChase.leaderId ? ['poop_right', 'poop_left'] : poopFollowers.includes(id) ? ['eat_right', 'eat_left'] : []
-    : [];
-  for (const group of requiredRoleGroups) {
-    if (!entry.frames?.[group]?.length) errors.push(`Missing ${id} role frame group: ${group}`);
+  const requiredGroups = relayParticipants.has(id)
+    ? [...baseGroups, 'poop_right', 'poop_left', 'eat_right', 'eat_left']
+    : baseGroups;
+  for (const group of requiredGroups) {
+    if (!entry.frames?.[group]?.length) errors.push(`Missing ${id} frame group: ${group}`);
+  }
+  for (const direction of ['right', 'left']) {
+    for (const anchorName of ['head', 'mouth', 'rear']) {
+      const point = entry.anchors?.[direction]?.[anchorName];
+      if (!Array.isArray(point) || point.length !== 2 || point.some((value) => !Number.isFinite(value) || value < 0 || value > 1)) {
+        errors.push(`${id} has invalid ${direction} ${anchorName} anchor.`);
+      }
+    }
   }
   for (const frames of Object.values(entry.frames || {})) {
     for (const relative of frames) {

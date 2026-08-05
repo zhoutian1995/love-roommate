@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnPnpm } from './lib/common.mjs';
+import { defaultPythonCandidates, probePythonCandidates } from './lib/official-validator.mjs';
 import { auditTextFilesForSensitivePaths } from './lib/privacy.mjs';
 
 const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -52,27 +53,20 @@ else {
   );
 }
 run('Security hardening tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'security-hardening.test.mjs'), path.join(skillRoot, 'scripts', 'tests', 'runtime-security.test.mjs')]);
-run('Template unit tests', process.execPath, ['--test', path.join(skillRoot, 'assets', 'electron-template', 'tests', 'behavior-engine.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'config.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'security.test.mjs')]);
+run('Template unit tests', process.execPath, ['--test', path.join(skillRoot, 'assets', 'electron-template', 'tests', 'behavior-engine.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'performance-v2.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'config.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'security.test.mjs')]);
+run('Release policy tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'release-policy.test.mjs')]);
 for (const issue of auditTextFilesForSensitivePaths(skillRoot, new Set(['.json', '.md', '.yaml', '.yml', '.txt']))) {
   failures.push(`${issue.file} contains absolute/private path text.`);
 }
 
 if (process.env.SKIP_OFFICIAL_VALIDATOR !== '1') {
-  const candidates = [
-    process.env.CODEX_PYTHON,
-    process.platform === 'win32' ? 'python.exe' : 'python3',
-    'python'
-  ].filter(Boolean);
-  const python = candidates.find((candidate) => {
-    const result = spawnSync(candidate, ['-c', 'import yaml'], { stdio: 'ignore' });
-    return result.status === 0;
-  });
+  const probe = probePythonCandidates(defaultPythonCandidates());
   const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   const validator = process.env.OFFICIAL_VALIDATOR_PATH
     ? path.resolve(process.env.OFFICIAL_VALIDATOR_PATH)
     : path.join(codexHome, 'skills', '.system', 'skill-creator', 'scripts', 'quick_validate.py');
-  if (!python) failures.push('No Python with PyYAML found for official Skill validation. Install PyYAML or set SKIP_OFFICIAL_VALIDATOR=1 if you only need repo-level checks.');
-  else if (fs.existsSync(validator)) run('Official Skill validation', python, ['-X', 'utf8', validator, '.']);
+  if (!probe.python) failures.push(probe.message);
+  else if (fs.existsSync(validator)) run('Official Skill validation', probe.python.command, [...probe.python.prefixArgs, '-X', 'utf8', validator, '.']);
   else failures.push(`Official validator not found at ${validator}. Set OFFICIAL_VALIDATOR_PATH or explicitly opt out with SKIP_OFFICIAL_VALIDATOR=1.`);
 }
 

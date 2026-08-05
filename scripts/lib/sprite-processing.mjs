@@ -47,6 +47,88 @@ export function removeChroma(data, width, height, key, transparentThreshold = 28
   return output;
 }
 
+export function cleanPortraitChromaEdges(data, width, height, key, radius = 20) {
+  const source = Buffer.from(data);
+  const output = Buffer.from(data);
+  const offsetAt = (x, y) => (y * width + x) * 4;
+  const isOpaque = (offset) => source[offset + 3] > 12;
+  const isKeySpill = (offset) => {
+    const red = source[offset];
+    const green = source[offset + 1];
+    const blue = source[offset + 2];
+    if (key[0] > 180 && key[2] > 180 && key[1] < 100) {
+      return red > green + 24 && blue > green + 24 && Math.min(red, blue) > 45;
+    }
+    if (key[1] > 180 && key[0] < 120 && key[2] < 120) {
+      return green > red + 24 && green > blue + 24 && green > 105;
+    }
+    return false;
+  };
+  const isCleanSubjectColor = (offset) => {
+    const red = source[offset];
+    const green = source[offset + 1];
+    const blue = source[offset + 2];
+    if (key[0] > 180 && key[2] > 180 && key[1] < 100) {
+      return !(red > green + 12 && blue > green + 12);
+    }
+    if (key[1] > 180 && key[0] < 120 && key[2] < 120) {
+      return green <= Math.max(red, blue) + 12;
+    }
+    return true;
+  };
+  const touchesTransparency = (x, y) => {
+    for (let dy = -2; dy <= 2; dy += 1) {
+      for (let dx = -2; dx <= 2; dx += 1) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) return true;
+        if (!isOpaque(offsetAt(nx, ny))) return true;
+      }
+    }
+    return false;
+  };
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = offsetAt(x, y);
+      if (!isOpaque(offset)) {
+        output[offset] = 0;
+        output[offset + 1] = 0;
+        output[offset + 2] = 0;
+        continue;
+      }
+      if (!isKeySpill(offset) || !touchesTransparency(x, y)) continue;
+      let best = null;
+      for (let distance = 1; distance <= radius && !best; distance += 1) {
+        for (let dy = -distance; dy <= distance && !best; dy += 1) {
+          for (let dx = -distance; dx <= distance; dx += 1) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== distance) continue;
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+            const candidate = offsetAt(nx, ny);
+            if (isOpaque(candidate) && isCleanSubjectColor(candidate)) { best = candidate; break; }
+          }
+        }
+      }
+      if (!best) continue;
+      for (let channel = 0; channel < 3; channel += 1) output[offset + channel] = source[best + channel];
+    }
+  }
+  return output;
+}
+
+export function preparePortraitAlpha(data, width, height, key, transparentThreshold = 28, opaqueThreshold = 105) {
+  let hasTransparency = false;
+  for (let offset = 3; offset < data.length; offset += 4) {
+    if (data[offset] < 250) { hasTransparency = true; break; }
+  }
+  const alphaReady = hasTransparency
+    ? Buffer.from(data)
+    : removeChroma(data, width, height, key, transparentThreshold, opaqueThreshold);
+  return cleanPortraitChromaEdges(alphaReady, width, height, key);
+}
+
 export function alphaBounds(data, width, height, threshold = 12) {
   let left = width;
   let top = height;
@@ -71,4 +153,20 @@ export function alphaBounds(data, width, height, threshold = 12) {
     height: bottom - top + 1,
     coverage: opaquePixels / (width * height)
   };
+}
+
+export function nearestVisibleAlphaDistance(data, width, height, point, threshold = 12) {
+  const targetX = Math.round(Number(point?.[0]) * (width - 1));
+  const targetY = Math.round(Number(point?.[1]) * (height - 1));
+  if (!Number.isFinite(targetX) || !Number.isFinite(targetY) || targetX < 0 || targetY < 0 || targetX >= width || targetY >= height) {
+    throw new Error('Anchor point must contain normalized x,y values.');
+  }
+  let nearest = Number.POSITIVE_INFINITY;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (data[(y * width + x) * 4 + 3] <= threshold) continue;
+      nearest = Math.min(nearest, Math.hypot(x - targetX, y - targetY));
+    }
+  }
+  return nearest;
 }

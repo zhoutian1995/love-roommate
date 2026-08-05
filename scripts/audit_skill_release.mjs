@@ -1,14 +1,40 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isRasterFile } from './lib/privacy.mjs';
+import { isRasterFile, sensitivePathMatches } from './lib/privacy.mjs';
 
-const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const args = process.argv.slice(2);
+const rootIndex = args.indexOf('--root');
+const defaultSkillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const skillRoot = rootIndex >= 0 ? path.resolve(args[rootIndex + 1] || '') : defaultSkillRoot;
 const forbiddenDirectories = new Set(['preview', 'release', 'dist', 'node_modules']);
 const ignoredDirectories = new Set(['.git']);
+const piiTextExtensions = new Set(['.json', '.md', '.yaml', '.yml', '.txt', '.log']);
+const reservedEmailDomains = new Set(['example.com', 'example.net', 'example.org', 'example.test']);
 const errors = [];
 const files = [];
 const stack = [skillRoot];
+
+if (rootIndex >= 0 && !args[rootIndex + 1]) {
+  console.error('- --root requires a directory.');
+  process.exit(1);
+}
+
+function piiIssues(text) {
+  const issues = [];
+  const emails = text.match(/[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,})/gi) || [];
+  if (emails.some((email) => !reservedEmailDomains.has(email.split('@').at(-1).toLowerCase()))) {
+    issues.push('email address');
+  }
+  if (/(?:姓名|真实姓名|联系人姓名|full\s+name|legal\s+name|contact\s+name)\s*[:：]\s*(?!<|\[|\{|example\b|test\b|placeholder\b|your\b)\S+/im.test(text)) {
+    issues.push('personal name');
+  }
+  if (/(?:微信号?|wechat(?:\s+id)?|qq号?|账号|account(?:\s+(?:id|name))?|用户名|username)\s*[:：]\s*(?!<|\[|\{|example\b|test\b|placeholder\b|your\b|person-\d+\b)\S+/im.test(text)) {
+    issues.push('account identifier');
+  }
+  if (sensitivePathMatches(text).length) issues.push('private path');
+  return issues;
+}
 
 while (stack.length) {
   const current = stack.pop();
@@ -28,6 +54,11 @@ while (stack.length) {
       errors.push(`SVG must not embed raster image data: ${relative}`);
     }
     if (fs.statSync(full).size > 1024 * 1024) errors.push(`Unexpected file larger than 1 MiB: ${relative}`);
+    if (piiTextExtensions.has(path.extname(entry.name).toLowerCase())) {
+      for (const issue of piiIssues(fs.readFileSync(full, 'utf8'))) {
+        errors.push(`Text ${issue} must not be published in the Skill: ${relative}`);
+      }
+    }
   }
 }
 

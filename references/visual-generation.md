@@ -1,54 +1,58 @@
-# Visual generation
+# Visual generation V3
 
-## Model gate
+## Non-negotiable style
 
-All final identity boards, 4x3 base action sheets, and 2x1 role action sheets must be generated with GPT Image 2. Do not accept another model, local pose synthesis, photo compositing, or deterministic drawing as final character art. Local scripts may only crop, chroma-key, normalize, fingerprint, and arrange GPT Image 2 outputs. Record every selected final source with `scripts/record_image_generation.mjs`; self-check rejects missing, stale, or non-GPT-Image-2 provenance.
+Use the authorized source photo as the identity reference. Final people must be photorealistic and recognizably the same subjects: preserve face shape, facial features, approximate age, hairstyle, skin tone, body build, clothing colors, glasses, and accessories. Do not use chibi proportions, cartoon faces, beautification, age reduction, costume replacement, or photographic-head compositing.
 
-## Identity board
+All selected master and action artwork must use Codex image generation under the declared GPT Image 2 workflow policy.
 
-Use the uploaded photo as an identity reference, not as an edit target. Preserve each person's face shape, hairstyle, approximate age, skin tone, glasses, and clothing colors. Redraw the complete body; never composite a real photographic head onto an illustrated body.
+## Identity-master gate
 
-Generate one numbered full-body lineup on a flat `#ff00ff` background. Put people in the agreed order with generous separation and no overlap. Use a polished 2D desktop-game sprite style with bold clean outlines and readable silhouettes at about 112 px. Include no text except simple person numbers above the figures.
+Create one independent full-body identity master per person before any action artwork.
 
-Approval checklist:
+- One person only, neutral standing pose, full body visible, fixed camera height and scale.
+- Use the source photo directly as identity reference; never derive a new master from an old generated action sheet.
+- Prefer a flat removable key that does not occur in the person. Keep generous padding and no shadows, props, text, scenery, or neighboring people.
+- Build an original-photo / master comparison board and complete the 100-point identity review.
+- Require total score >= 90 and identity similarity >= 31/35 with no blocker before action generation.
 
-- Every person is present exactly once.
-- Faces and hairstyles remain distinguishable at small size.
-- Clothing colors and major accessories do not migrate between people.
-- No limbs, clothing, or hair overlap neighboring people.
-- No photoreal head cutouts, watermarks, scenery, floor, or shadows.
+## Per-action generation
 
-## Per-character action sheet
+Do not generate a 4x3 or other large multi-action sheet. Generate each action, or at most a mirrored left/right pair, using the approved identity master plus the original photo as references.
 
-After identity approval, generate one separate 4-column by 3-row sheet per person. Use the approved identity board and the original photo as references. Keep one consistent scale, costume, outline, face, and lighting across all twelve cells.
+Required actions:
 
-Use this exact cell order:
+- crawl right A/B and crawl left A/B
+- idle right/left
+- centipede right/left
+- kneel shout 1/2/3
+- dragged/limp
+- poop right/left
+- eat right/left
 
-| Row | Column 1 | Column 2 | Column 3 | Column 4 |
-|---|---|---|---|---|
-| 1 | crawl right A | crawl right B | crawl left A | crawl left B |
-| 2 | idle right | idle left | centipede right | centipede left |
-| 3 | shout up | shout down | shout wave | dragged/limp |
+Every participant receives both poop and eat actions. Kneel-shout frames keep the same kneeling body pose and vary only the mouth/arms. Centipede frames must expose a readable mouth point and rear point for physical mouth-to-rear connection.
 
-Prompt requirements:
+Each accepted action record must contain the approved master fingerprint, prompt version, action name, generation version, and optional superseded-file/rejection reason.
 
-- Perfectly flat solid `#ff00ff` background, no grid lines, shadow, text, scenery, props, slime, poop, or speech bubbles.
-- Each cell contains exactly one complete character with padding and no cell bleed.
-- Centipede poses are comedic crawling/kneeling poses with a clear head end and rear end; keep them non-graphic.
-- Shout frames use one consistent body pose with only arms/mouth changing.
-- Keep the character opaque with crisp edges and avoid `#ff00ff` in clothes or skin.
+## Transparency
 
-If a character wears strong magenta, switch the key to `#00ff00` and pass `--key #00ff00` to `process_sprites.mjs`.
+The released sprite must be a clean transparent PNG. A white or chroma-key background is only an intermediate production aid and must never remain visible in the desktop pet.
 
-## Poop-chase role sheet
+- White is allowed when it stays clearly separated from hair, skin, clothing, shoes, and highlights. Do not use naive white removal when the subject contains white or pale-gray areas.
+- Otherwise choose one flat removable key that does not occur in the person. The key color is not part of the visual design.
+- For photorealistic people, prefer hard background removal (`border` auto-key, tolerance 24, edge contraction 1) followed by portrait-edge cleanup. Do not apply global strong despill or soft-matte color replacement to faces, skin, hair, or clothing.
+- Fully transparent pixels must have RGB `0,0,0`; hidden magenta/green/white RGB is a failure because resizing can reveal a colored halo.
+- Reject any visible purple, green, gray, or white fringe, semi-transparent rectangle, opaque corner, background gradient, damaged skin tone, or transparent holes in faces and hands.
 
-When `poopChase.enabled` is true, generate a separate 2-column by 1-row role sheet for every participant, at the same scale and in the same costume as the approved 4x3 sheet.
+## Quality gate
 
-- Leader cell order: `poop right`, `poop left`. Show a readable comedic squatting/straining pose, but do not draw poop inside the character cell; runtime renders it separately.
-- Follower cell order: `eat right`, `eat left`. Show a lowered head, open mouth, and forward bite. Keep it exaggerated, non-graphic, and free of blood or realistic bodily detail.
-- Keep the same flat chroma key, generous padding, complete body, no grid, no text, no props, no shadows, and exactly one character per cell.
-- Process with `scripts/process_role_sprites.mjs --role leader|follower`.
+Review source photo -> identity master -> every action side by side. Fail on:
 
-## Transparency policy
+- face or age drift, beautification, body-build changes, clothing/accessory changes;
+- cross-person identity migration;
+- chibi/cartoon rendering or inconsistent realism;
+- missing/fused/clipped body parts;
+- action scale or camera changes;
+- chroma fringe or dirty transparency.
 
-Use built-in `$imagegen` first with a flat chroma-key background. Do not silently switch to CLI or request an API key. The supplied Node processor removes ordinary flat keys. If hair, glass, translucent material, or severe spill cannot be cleaned, explain that native transparency requires the imagegen CLI fallback and explicit user approval before using it.
+Do not lower thresholds to release an asset. Regenerate only the failed person/action from the approved master.
