@@ -145,6 +145,15 @@ test('build refresh can replace stale smoke evidence before the strict runtime g
   assert.doesNotMatch(runtimeGate, /'--warn-only'/, 'post-capture self-check must remain strict before packaging');
 });
 
+test('root Skill installation uses the verified download mode and rejects git-mode copies', () => {
+  const readme = fs.readFileSync(path.join(skillRoot, 'README.md'), 'utf8');
+  const installerCommands = [...readme.matchAll(/install-skill-from-github\.py[^\n]+/g)].map((match) => match[0]);
+  assert.ok(installerCommands.length >= 2);
+  assert.ok(installerCommands.every((command) => command.includes('--method download')));
+  assert.match(readme, /不要对仓库根目录使用 `--method git --path \.`/);
+  assert.match(readme, /会把临时 clone 的 `\.git` 一并复制/);
+});
+
 test('build gate runs and verifies both gradual group-shout scenarios', () => {
   const build = fs.readFileSync(path.join(skillRoot, 'scripts', 'build_project.mjs'), 'utf8');
   assert.match(build, /scenarios\.push\('dad-shout', 'grandpa-shout'\)/);

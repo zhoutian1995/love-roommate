@@ -46,7 +46,7 @@
 在 Codex 中输入：
 
 ```text
-使用 $skill-installer，从 GitHub 仓库 zhoutian1995/love-roommate 的根目录安装 Skill，安装名设为 love-roommate。
+使用 $skill-installer，以 ZIP/download 模式从 GitHub 仓库 zhoutian1995/love-roommate 的根目录安装 Skill，安装名设为 love-roommate。
 ```
 
 安装完成后，新建一个 Codex 任务或重启 Codex，使 `$love-roommate` 出现在可用 Skill 列表中。
@@ -58,18 +58,20 @@
 Windows PowerShell：
 
 ```powershell
-python "$HOME\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py" --repo zhoutian1995/love-roommate --path . --name love-roommate
+python "$HOME\.codex\skills\.system\skill-installer\scripts\install-skill-from-github.py" --repo zhoutian1995/love-roommate --path . --name love-roommate --method download
 ```
 
 macOS：
 
 ```bash
-python3 "$HOME/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py" --repo zhoutian1995/love-roommate --path . --name love-roommate
+python3 "$HOME/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py" --repo zhoutian1995/love-roommate --path . --name love-roommate --method download
 ```
+
+仓库根目录安装必须使用上面的 ZIP/download 模式。不要对仓库根目录使用 `--method git --path .`：当前 Skill Installer 会把临时 clone 的 `.git` 一并复制，结果不是干净的 78 文件 Skill 安装。
 
 ### 开发者安装：使用 Git
 
-普通用户不需要安装 Git。这个方式适合需要查看源码、参与开发或调试安装过程的人。
+普通用户不需要安装 Git。这个方式适合需要查看源码、参与开发或调试安装过程的人；它会保留 `.git`，属于源码工作副本，不是上面的干净 Skill 安装。
 
 Windows PowerShell：
 
