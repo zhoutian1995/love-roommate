@@ -141,6 +141,13 @@ test('packaged performance runner records launch, partial, exit, and total-deadl
   assert.match(source, /validate_performance_report\.mjs/);
 });
 
+test('build verification passes the measured packaged executable and runtime root to the performance validator', () => {
+  const source = fs.readFileSync(path.join(skillRoot, 'scripts', 'build_project.mjs'), 'utf8');
+  assert.match(source, /project[\s\S]*dist[\s\S]*windows[\s\S]*safeName/);
+  assert.match(source, /--executable[\s\S]*performanceExecutable/);
+  assert.match(source, /--packaged-root[\s\S]*performancePackagedRoot/);
+});
+
 test('validator accepts a fresh complete passing report', { skip: !available }, () => {
   const fixtureValue = fixture();
   const result = runValidator(fixtureValue.project, fixtureValue.reportPath, fixtureValue.executable, fixtureValue.packagedRoot);

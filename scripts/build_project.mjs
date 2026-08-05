@@ -190,6 +190,9 @@ const selfCheckScript = path.join(skillRoot, 'scripts', 'self_check_project.mjs'
 const privacyScript = path.join(skillRoot, 'scripts', 'audit_output_privacy.mjs');
 const performanceScript = path.join(skillRoot, 'scripts', 'validate_performance_report.mjs');
 const windowsPerformanceReport = path.join(preview, 'performance', 'windows-performance-report.json');
+const performanceArtifact = path.join(project, 'dist', 'windows', safeName);
+const performanceExecutable = path.join(performanceArtifact, `${safeName}.exe`);
+const performancePackagedRoot = path.join(performanceArtifact, 'resources', 'app');
 const sourceArgs = typeof args.source === 'string' ? ['--source', path.resolve(args.source)] : [];
 if (!runNode(validateScript, ['--project', project, ...sourceArgs, ...nodeArgs])) fail('Project validation failed.');
 if (!runNode(selfCheckScript, ['--project', project, '--preview', preview, '--warn-only', ...nodeArgs])) {
@@ -254,7 +257,12 @@ if (!runNode(selfCheckScript, ['--project', project, '--preview', preview, '--ru
 if (!runNode(privacyScript, ['--root', outputRoot, ...sourceArgs])) {
   fail('Output privacy audit failed. Remove host paths, unlisted raster files, or copied source photos before packaging.');
 }
-if (process.platform === 'win32' && !runNode(performanceScript, ['--project', project, '--report', windowsPerformanceReport])) {
+if (process.platform === 'win32' && !runNode(performanceScript, [
+  '--project', project,
+  '--report', windowsPerformanceReport,
+  '--executable', performanceExecutable,
+  '--packaged-root', performancePackagedRoot
+])) {
   fail('Performance report validation failed. Run the packaged Windows performance audit and keep a fresh passing preview/performance/windows-performance-report.json.');
 }
 
