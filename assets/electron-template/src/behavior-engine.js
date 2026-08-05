@@ -50,6 +50,7 @@ class BehaviorEngine {
     this.lastDropPoint = null;
     this.poopRelay = null;
     this.shoutStartedAt = 0;
+    this.shoutTargetIds = new Set();
     this.nextTurnAt = 0;
     this.nextDadAt = this.randomDadDelay();
     this.pets = config.characters.map((character, index) => this.createPet(character, index));
@@ -242,23 +243,23 @@ class BehaviorEngine {
     this.interruptFormation();
     const duration = 4.2;
     const targets = group ? this.pets : [this.pets[Math.floor(this.random() * this.pets.length)]];
-    if (group) this.arrangeKneelingRow(targets);
+    this.arrangeKneelingRow(targets);
     targets.forEach((pet) => {
       pet.phrase = this.behaviors.phrases.dad;
       pet.phraseUntil = this.elapsed + duration;
-      pet.action = group ? 'kneel_shout_1' : 'shout';
+      pet.action = 'kneel_shout_1';
     });
-    if (group) {
-      this.mode = 'shout';
-      this.shoutStartedAt = this.elapsed;
-      this.modeUntil = this.elapsed + duration;
-    }
+    this.shoutTargetIds = new Set(targets.map((pet) => pet.id));
+    this.mode = 'shout';
+    this.shoutStartedAt = this.elapsed;
+    this.modeUntil = this.elapsed + duration;
   }
 
   callGrandpa() {
     this.interruptFormation();
     const duration = 4.2;
     this.arrangeKneelingRow(this.pets);
+    this.shoutTargetIds = new Set(this.pets.map((pet) => pet.id));
     this.pets.forEach((pet) => {
       pet.phrase = this.behaviors.phrases.grandpa;
       pet.phraseUntil = this.elapsed + duration;
@@ -423,13 +424,16 @@ class BehaviorEngine {
     if (this.mode === 'shout') {
       if (this.elapsed >= this.modeUntil) {
         this.mode = 'free';
+        this.shoutTargetIds.clear();
         this.pets.forEach((pet) => {
           pet.phrase = '';
           pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
         });
       } else {
         const frame = Math.min(3, Math.floor((this.elapsed - this.shoutStartedAt) / 1.4) + 1);
-        this.pets.forEach((pet) => { pet.action = `kneel_shout_${frame}`; });
+        this.pets.forEach((pet) => {
+          if (this.shoutTargetIds.has(pet.id)) pet.action = `kneel_shout_${frame}`;
+        });
       }
       this.sanitizeState();
       return this.snapshot();

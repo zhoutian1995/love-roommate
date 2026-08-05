@@ -94,3 +94,16 @@ test('group shout uses three kneeling frames before returning to free mode', () 
   engine.update(1, {}); engine.update(0.41, {});
   assert.equal(engine.mode, 'free');
 });
+
+test('single dad shout keeps the selected pet kneeling through all three frames', () => {
+  const engine = fixture();
+  engine.callDad(false);
+  const target = engine.pets.find((pet) => pet.action === 'kneel_shout_1');
+  assert.ok(target, 'the selected pet must start in a kneeling pose');
+  assert.equal(engine.pets.filter((pet) => pet.action === 'kneel_shout_1').length, 1);
+  assert.equal(engine.mode, 'shout');
+  engine.update(1, {}); engine.update(0.41, {});
+  assert.equal(target.action, 'kneel_shout_2');
+  engine.update(1, {}); engine.update(0.41, {});
+  assert.equal(target.action, 'kneel_shout_3');
+});
