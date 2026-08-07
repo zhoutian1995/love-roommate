@@ -45,10 +45,10 @@ async function nearestExistingAncestor(filePath) {
   }
 }
 
-async function assertNewCorrectionPath(rootReal, correctionsReal, filePath, inputs, label) {
+async function assertNewCorrectionPath(correctionsRequested, correctionsReal, filePath, inputs, label) {
   const resolved = path.resolve(filePath);
   if (inputs.some((input) => input === resolved)) throw new Error(`${label} must not equal an input`);
-  if (!isWithin(path.join(rootReal, 'preview', 'corrections'), resolved)) {
+  if (!isWithin(correctionsRequested, resolved)) {
     throw new Error(`${label} must be inside preview${path.sep}corrections`);
   }
   try {
@@ -65,18 +65,19 @@ async function assertNewCorrectionPath(rootReal, correctionsReal, filePath, inpu
 
 async function validateOptions(options) {
   if (typeof options?.composeCorrection !== 'function') throw new Error('composeCorrection callback is required');
-  const rootReal = await realpath(options.root);
+  const rootRequested = path.resolve(options.root);
+  const rootReal = await realpath(rootRequested);
   const inputReal = await assertRegularFileWithin(rootReal, options.input, 'input');
   const candidateReal = await assertRegularFileWithin(rootReal, options.candidate, 'candidate');
-  const corrections = path.join(rootReal, 'preview', 'corrections');
-  const correctionsReal = await realpath(corrections);
+  const correctionsRequested = path.join(rootRequested, 'preview', 'corrections');
+  const correctionsReal = await realpath(correctionsRequested);
   const inputs = [path.resolve(options.input), path.resolve(options.candidate), inputReal, candidateReal];
   const outputPaths = [options.out, options.mask, options.report].map((file) => path.resolve(file));
   if (new Set(outputPaths.map((file) => process.platform === 'win32' ? file.toLowerCase() : file)).size !== outputPaths.length) {
     throw new Error('out, mask, and report must be distinct paths');
   }
   for (const [label, filePath] of [['out', options.out], ['mask', options.mask], ['report', options.report]]) {
-    await assertNewCorrectionPath(rootReal, correctionsReal, filePath, inputs, label);
+    await assertNewCorrectionPath(correctionsRequested, correctionsReal, filePath, inputs, label);
   }
   if (options.width != null && (!Number.isInteger(options.width) || options.width < 1 || options.width > MAX_DIMENSION)) {
     throw new Error(`width must be an integer from 1 to ${MAX_DIMENSION}`);

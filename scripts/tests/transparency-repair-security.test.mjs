@@ -45,6 +45,33 @@ function auth(server, pathname = '/api/session', init = {}) {
   });
 }
 
+test('startup accepts a correction root reached through a filesystem alias', async (t) => {
+  const base = await fixtureOptions();
+  const aliasParent = await mkdtemp(path.join(tmpdir(), 'love-roommate-repair-alias-'));
+  const rootAlias = path.join(aliasParent, 'project');
+  try {
+    await symlink(base.root, rootAlias, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (error) {
+    if (error.code === 'EPERM') {
+      t.skip('当前环境不允许创建符号链接或目录联接');
+      return;
+    }
+    throw error;
+  }
+  const throughAlias = (file) => path.join(rootAlias, path.relative(base.root, file));
+  const server = await startRepairServer({
+    ...base,
+    root: rootAlias,
+    input: throughAlias(base.input),
+    candidate: throughAlias(base.candidate),
+    out: throughAlias(base.out),
+    mask: throughAlias(base.mask),
+    report: throughAlias(base.report),
+  });
+  t.after(server.close);
+  assert.match(server.url, /^http:\/\/127\.0\.0\.1:\d+\/\?token=[a-f0-9]{32}$/);
+});
+
 test('server binds loopback, emits security headers, and rejects unauthenticated API calls', async (t) => {
   const server = await startRepairServer(await fixtureOptions());
   t.after(server.close);
