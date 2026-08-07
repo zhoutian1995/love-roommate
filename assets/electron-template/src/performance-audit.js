@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const PERFORMANCE_REPORT_SCHEMA_VERSION = 3;
+const PERFORMANCE_REPORT_SCHEMA_VERSION = 4;
 const PERFORMANCE_FINGERPRINT_SCHEMA_VERSION = 3;
 const RUNTIME_BUILD_FILE = 'runtime-build.json';
 
@@ -71,6 +71,7 @@ function petRenderKey(state) {
     state?.effect || '',
     Number(state?.effectSize) || 0,
     state?.direction || '',
+    Boolean(state?.shoutRecipient),
     Boolean(state?.paused)
   ]);
 }
@@ -95,6 +96,19 @@ function processesForSample(sample) {
   return [...new Set((sample?.processIds || []).filter((pid) => Number.isInteger(pid) && pid > 0))]
     .sort((left, right) => left - right)
     .map((pid) => ({ pid, creationTime: null, type: 'Unknown', serviceName: '', name: '' }));
+}
+
+function petWindowsForSample(sample) {
+  if (!Array.isArray(sample?.petWindows)) return [];
+  return sample.petWindows
+    .map((entry) => ({
+      id: String(entry?.id || ''),
+      pid: Number.isInteger(Number(entry?.pid)) && Number(entry.pid) > 0 ? Number(entry.pid) : null,
+      visible: entry?.visible === true,
+      destroyed: entry?.destroyed === true
+    }))
+    .filter((entry) => entry.id)
+    .sort((left, right) => left.id.localeCompare(right.id, 'en'));
 }
 
 function summarizePerformancePhase({ durationMs, frameIntervalsMs = [], eventLoopDelaysMs = [], processSamples = [] }, thresholds = DEFAULT_PERFORMANCE_THRESHOLDS) {
@@ -132,9 +146,22 @@ function summarizePerformancePhase({ durationMs, frameIntervalsMs = [], eventLoo
   const processCounts = processSamples.map((sample) => processesForSample(sample).length);
   const processCountMax = processCounts.length ? Math.max(...processCounts) : 0;
   const observedProcesses = [...observed.values()].sort((left, right) => left.pid - right.pid);
+  const continuouslyObservedPids = processSamples.length
+    ? processesForSample(processSamples[0]).map((process) => process.pid)
+      .filter((pid) => processSamples.every((sample) => processesForSample(sample).some((process) => process.pid === pid)))
+    : [];
   const peakSnapshots = snapshots.filter((entry) => entry.count === processCountMax);
   const workingSetMax = workingSets.length ? Math.max(...workingSets) : 0;
   const privateMax = privateMemory.length ? Math.max(...privateMemory) : 0;
+  const petWindowSamples = processSamples.map((sample) => ({
+    atMs: round(sample.atMs),
+    windows: petWindowsForSample(sample)
+  }));
+  const petWindowCounts = petWindowSamples.map((sample) => sample.windows.filter((entry) => entry.visible && !entry.destroyed).length);
+  const continuouslyVisibleIds = petWindowSamples.length
+    ? petWindowSamples[0].windows.filter((entry) => entry.visible && !entry.destroyed).map((entry) => entry.id)
+      .filter((id) => petWindowSamples.every((sample) => sample.windows.some((entry) => entry.id === id && entry.visible && !entry.destroyed)))
+    : [];
 
   return {
     durationMs: round(durationMs),
@@ -174,10 +201,19 @@ function summarizePerformancePhase({ durationMs, frameIntervalsMs = [], eventLoo
       countMax: processCountMax,
       peakCount: processCountMax,
       observedPids: observedProcesses.map((process) => process.pid),
+      continuouslyObservedPids,
       observedProcesses,
       typePeakCounts,
       pidSets: snapshots.map(({ count, pids }) => ({ count, pids })),
       peakSnapshots
+    },
+    petWindows: {
+      metricSource: 'BrowserWindow.isVisible/isDestroyed',
+      sampleCount: petWindowSamples.length,
+      countMin: petWindowCounts.length ? Math.min(...petWindowCounts) : 0,
+      countMax: petWindowCounts.length ? Math.max(...petWindowCounts) : 0,
+      continuouslyVisibleIds,
+      samples: petWindowSamples
     }
   };
 }
@@ -197,22 +233,49 @@ function summarizeProcessLifecycle(phases) {
   };
 }
 
-function validProcessCoverage(processes, minimumCount, requiredSamples) {
+function validProcessCoverage(processes, requiredSamples) {
   if (processes?.metricSource !== PERFORMANCE_METRIC_SOURCE.api) return false;
   if (!Number.isInteger(processes.sampleCount) || processes.sampleCount < requiredSamples) return false;
   if (!Number.isInteger(processes.countMin) || !Number.isInteger(processes.countMax) || !Number.isInteger(processes.peakCount)) return false;
-  if (processes.countMin < minimumCount || processes.countMax < processes.countMin || processes.peakCount !== processes.countMax) return false;
+  if (processes.countMin < 3 || processes.countMax < processes.countMin || processes.peakCount !== processes.countMax) return false;
   if (!Array.isArray(processes.observedProcesses) || !processes.observedProcesses.length) return false;
   if (!processes.observedProcesses.every((entry) => normalizeProcessEntry(entry))) return false;
+  if ((Number(processes.typePeakCounts?.Browser) || 0) < 1 || (Number(processes.typePeakCounts?.Tab) || 0) < 1) return false;
+  if (!Array.isArray(processes.continuouslyObservedPids) || !processes.continuouslyObservedPids.length) return false;
+  if (!processes.continuouslyObservedPids.every((pid) => Number.isInteger(pid) && pid > 0 && processes.observedPids.includes(pid))) return false;
   if (!Array.isArray(processes.peakSnapshots) || !processes.peakSnapshots.length) return false;
   if (!processes.peakSnapshots.every((entry) => entry.count === processes.peakCount && Array.isArray(entry.processes) && entry.processes.length === entry.count)) return false;
   return true;
 }
 
+function validPetWindowCoverage(petWindows, expectedIds, requiredSamples, durationMs, continuouslyObservedPids) {
+  if (petWindows?.metricSource !== 'BrowserWindow.isVisible/isDestroyed') return false;
+  if (!Array.isArray(petWindows.samples) || petWindows.samples.length !== petWindows.sampleCount) return false;
+  if (!Number.isInteger(petWindows.sampleCount) || petWindows.sampleCount < requiredSamples) return false;
+  const firstAtMs = Number(petWindows.samples[0]?.atMs);
+  const lastAtMs = Number(petWindows.samples.at(-1)?.atMs);
+  if (!Number.isFinite(firstAtMs) || !Number.isFinite(lastAtMs) || !Number.isFinite(durationMs)
+    || firstAtMs < 0 || firstAtMs > 1500 || lastAtMs < durationMs - 1500 || lastAtMs > durationMs + 2500) return false;
+  if (petWindows.countMin !== expectedIds.length || petWindows.countMax !== expectedIds.length) return false;
+  if (JSON.stringify([...(petWindows.continuouslyVisibleIds || [])].sort()) !== JSON.stringify([...expectedIds].sort())) return false;
+  let previousAtMs = null;
+  return petWindows.samples.every((sample) => {
+    if (!Number.isFinite(sample?.atMs) || !Array.isArray(sample.windows) || sample.windows.length !== expectedIds.length) return false;
+    if (previousAtMs !== null && (sample.atMs <= previousAtMs || sample.atMs - previousAtMs > 2500)) return false;
+    previousAtMs = sample.atMs;
+    const ids = sample.windows.map((entry) => entry?.id);
+    if (new Set(ids).size !== expectedIds.length || expectedIds.some((id) => !ids.includes(id))) return false;
+    return sample.windows.every((entry) => entry.visible === true && entry.destroyed === false
+      && Number.isInteger(entry.pid) && continuouslyObservedPids.includes(entry.pid));
+  });
+}
+
 function evaluatePerformanceReport(report, thresholds = DEFAULT_PERFORMANCE_THRESHOLDS, context = {}) {
   const violations = [];
   const expectedWindowCount = Number.isInteger(report?.expectedWindowCount) ? report.expectedWindowCount : null;
+  const expectedPetIds = Array.isArray(report?.expectedPetIds) && report.expectedPetIds.length ? report.expectedPetIds : null;
   const expectedFingerprint = context.expectedRuntimeFingerprint;
+  const expectedCandidateFingerprint = context.expectedCandidateFingerprint;
   if (report?.schemaVersion !== PERFORMANCE_REPORT_SCHEMA_VERSION) {
     addViolation(violations, 'report-schema', `Performance report schemaVersion must be ${PERFORMANCE_REPORT_SCHEMA_VERSION}.`);
   }
@@ -222,11 +285,17 @@ function evaluatePerformanceReport(report, thresholds = DEFAULT_PERFORMANCE_THRE
   if (!/^[a-f0-9]{64}$/.test(report?.runtimeFingerprint || '') || !/^[a-f0-9]{64}$/.test(expectedFingerprint || '') || report.runtimeFingerprint !== expectedFingerprint) {
     addViolation(violations, 'runtime-fingerprint', 'Performance report runtime fingerprint does not match the independently computed runtime.');
   }
+  if (!/^[a-f0-9]{64}$/.test(report?.candidateFingerprint || '') || !/^[a-f0-9]{64}$/.test(expectedCandidateFingerprint || '') || report.candidateFingerprint !== expectedCandidateFingerprint) {
+    addViolation(violations, 'candidate-fingerprint', 'Performance report candidate fingerprint does not match the independently computed code candidate.');
+  }
   if (JSON.stringify(report?.metricSource) !== JSON.stringify(PERFORMANCE_METRIC_SOURCE)) {
     addViolation(violations, 'metric-source', 'Performance metrics must come from app.getAppMetrics across all current Electron app processes.');
   }
   if (!expectedWindowCount || report.windowCount !== expectedWindowCount) {
     addViolation(violations, 'window-count', `Expected ${expectedWindowCount || 'the configured number of'} visible pet windows, got ${report?.windowCount ?? 'unknown'}.`);
+  }
+  if (!expectedPetIds || expectedPetIds.length !== expectedWindowCount || new Set(expectedPetIds).size !== expectedPetIds.length) {
+    addViolation(violations, 'pet-window-identities', 'Performance report must declare the exact unique configured pet ids.');
   }
   if (report?.startupMeasurement?.start !== 'runner-before-executable-spawn' || report?.startupMeasurement?.end !== 'all-pet-windows-presented') {
     addViolation(violations, 'startup-measurement', 'Startup timing must cover executable spawn through all pet windows being presented.');
@@ -255,8 +324,11 @@ function evaluatePerformanceReport(report, thresholds = DEFAULT_PERFORMANCE_THRE
       || phase.samples.processMetrics < requiredProcessSamples) {
       addViolation(violations, 'sample-coverage', `${name} does not contain enough frame, event-loop, and process samples for its duration.`);
     }
-    if (!validProcessCoverage(phase.processes, (expectedWindowCount || 0) + 1, requiredProcessSamples)) {
+    if (!validProcessCoverage(phase.processes, requiredProcessSamples)) {
       addViolation(violations, 'process-coverage', `${name} does not record complete typed Electron process evidence.`);
+    }
+    if (!expectedPetIds || !validPetWindowCoverage(phase.petWindows, expectedPetIds, requiredProcessSamples, durationMs, phase.processes?.continuouslyObservedPids || [])) {
+      addViolation(violations, 'pet-window-coverage', `${name} does not prove that every configured pet window stayed visible for the full phase.`);
     }
     if (name !== 'pause') {
       const minimumTicker = thresholds.targetFps * thresholds.activeTickerRatioMin;
@@ -372,12 +444,28 @@ function runtimeFingerprintForProject(projectRoot) {
   return hash.digest('hex');
 }
 
+function candidateFingerprintForProject(projectRoot) {
+  const hash = crypto.createHash('sha256');
+  hash.update(`love-roommate-performance-candidate-v${PERFORMANCE_FINGERPRINT_SCHEMA_VERSION}\0`);
+  hash.update(`runtime\0${JSON.stringify(runtimeBuildMetadataForProject(projectRoot))}\0`);
+  for (const file of runtimeFiles(projectRoot)) {
+    const relative = path.relative(projectRoot, file).replaceAll('\\', '/');
+    if (relative.startsWith('src/config/') || relative.startsWith('src/assets/sprites/')) continue;
+    hash.update(relative);
+    hash.update('\0');
+    hash.update(fs.readFileSync(file));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
 module.exports = {
   DEFAULT_PERFORMANCE_THRESHOLDS,
   PERFORMANCE_FINGERPRINT_SCHEMA_VERSION,
   PERFORMANCE_METRIC_SOURCE,
   PERFORMANCE_REPORT_SCHEMA_VERSION,
   RUNTIME_BUILD_FILE,
+  candidateFingerprintForProject,
   compensatedTickerDelay,
   evaluatePerformanceReport,
   nextTickerSchedule,

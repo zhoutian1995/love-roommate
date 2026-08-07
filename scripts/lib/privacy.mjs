@@ -63,9 +63,10 @@ function sanitizeString(value, outputRoot) {
   let result = value;
   for (const root of roots) result = result.replaceAll(root, '.');
   result = result
+    .replace(/file:\/\/\/[^\s"'`<>]*/gi, '[redacted-path]')
     .replace(/(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"'`<>]*/g, '[redacted-path]')
     .replace(/\\\\[^\s"'`<>]+/g, '[redacted-path]')
-    .replace(/\/(?:Users|home)\/[^\s"'`<>]*/g, '[redacted-path]');
+    .replace(/(?<![:A-Za-z0-9])\/(?:Users|home|Volumes|private|tmp|var\/folders|Applications|Library|opt)\/[^\s"'`<>]*/gi, '[redacted-path]');
   return result;
 }
 
@@ -90,9 +91,10 @@ export function sanitizePersistedValue(value, outputRoot) {
 export function sensitivePathMatches(text) {
   const matches = [];
   const patterns = [
+    /file:\/\/\/[^\s"'`<>]*/gi,
     /(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"'`<>]*/g,
     /\\\\[^\s"'`<>]+/g,
-    /\/(?:Users|home)\/[^\s"'`<>]*/g
+    /(?<![:A-Za-z0-9])\/(?:Users|home|Volumes|private|tmp|var\/folders|Applications|Library|opt)\/[^\s"'`<>]*/gi
   ];
   for (const pattern of patterns) matches.push(...(text.match(pattern) || []));
   return [...new Set(matches)];

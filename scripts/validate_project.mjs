@@ -2,12 +2,13 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { applyCodexRuntimeArgs, fail, loadSharp, parseArgs, readJson } from './lib/common.mjs';
+import { actionFrameDescriptor, compareActionContract, deriveActionContract } from './lib/action-contract.mjs';
 import { alphaBounds } from './lib/sprite-processing.mjs';
 import { auditTextFilesForSensitivePaths, isRasterFile, portableRelative } from './lib/privacy.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 applyCodexRuntimeArgs(args);
-if (!args.project) fail('Usage: node validate_project.mjs --project <project> --pnpm <codex-pnpm> [--node-modules <codex-node-modules>] [--source <original-photo>]');
+if (!args.project) fail('Usage: node validate_project.mjs --project <project> --pnpm <codex-pnpm> [--node-modules <codex-node-modules>] [--source <original-photo>] [--selection-only]');
 const project = path.resolve(args.project);
 const projectManifestPath = path.join(path.dirname(project), 'project-manifest.json');
 const configPath = path.join(project, 'src', 'config', 'pet.config.json');
@@ -40,20 +41,39 @@ if (config.schemaVersion !== 1 || behaviors.schemaVersion !== 1 || manifest.sche
 if (!Array.isArray(config.characters) || config.characters.length < 1 || config.characters.length > 8) errors.push('pet.config.json must contain 1-8 characters.');
 const ids = config.characters.map((character) => character.id);
 if (new Set(ids).size !== ids.length) errors.push('Character ids must be unique.');
+for (const character of config.characters) {
+  if (character.hueRotate !== 0) errors.push(`${character.id} hueRotate must be exactly 0 for photorealistic characters.`);
+}
 if (config.render.spriteSize < 72 || config.render.spriteSize > 160) errors.push('render.spriteSize must be 72-160.');
 if (config.render.effectSize < 16 || config.render.effectSize > 48) errors.push('render.effectSize must be 16-48.');
 if (config.render.windowSize <= config.render.spriteSize) errors.push('render.windowSize must exceed render.spriteSize.');
 if (config.packaging.windowsTarget !== 'portable') errors.push('Windows target must be portable in v1.');
 if (config.packaging.macTarget !== 'dir' || config.packaging.macArch !== 'arm64') errors.push('macOS target must be unsigned arm64 dir in v1.');
 const selection = config.selection || {};
-if (!['normal', 'centipede', 'poop-relay', 'all'].includes(selection.mode)) errors.push('selection.mode must be normal, centipede, poop-relay, or all.');
+if (!['normal', 'group-shout', 'poop-chase', 'all'].includes(selection.mode)) errors.push('selection.mode must be normal, group-shout, poop-chase, or all.');
 if (selection.userCharacterId !== null && !ids.includes(selection.userCharacterId)) errors.push('selection.userCharacterId must be null or a configured character id.');
 const prankExcludedIds = Array.isArray(selection.prankExcludedCharacterIds) ? selection.prankExcludedCharacterIds : [];
 if (!Array.isArray(selection.prankExcludedCharacterIds)) errors.push('selection.prankExcludedCharacterIds must be an array.');
 if (new Set(prankExcludedIds).size !== prankExcludedIds.length) errors.push('selection.prankExcludedCharacterIds must be unique.');
 for (const id of prankExcludedIds) if (!ids.includes(id)) errors.push(`Unknown prank-excluded character: ${id}.`);
-if (selection.userCharacterId !== null && !prankExcludedIds.includes(selection.userCharacterId)) errors.push('selection.userCharacterId must be included in selection.prankExcludedCharacterIds.');
+const expectedPrankExcludedIds = selection.userCharacterId ? [selection.userCharacterId] : [];
+if (JSON.stringify(prankExcludedIds) !== JSON.stringify(expectedPrankExcludedIds)) {
+  errors.push('selection.prankExcludedCharacterIds must contain only the selected self, or be empty when the user is not depicted.');
+}
 if (!behaviors.hotkeys?.dad || !behaviors.hotkeys?.grandpa || !behaviors.hotkeys?.centipede || !behaviors.hotkeys?.poopChase || !behaviors.hotkeys?.pause) errors.push('All default hotkeys must be configured.');
+
+const singletonSelf = ids.length === 1 && selection.userCharacterId === ids[0];
+const groupShoutSelected = selection.mode === 'group-shout' || selection.mode === 'all';
+const expectedGroupShoutSkippedReason = groupShoutSelected && singletonSelf ? 'no-eligible-participants' : null;
+const groupShoutEnabled = groupShoutSelected && !expectedGroupShoutSkippedReason;
+if ((selection.groupShoutSkippedReason ?? null) !== expectedGroupShoutSkippedReason) errors.push('selection.groupShoutSkippedReason does not match the selected self, people count, and mode.');
+if (Boolean(behaviors.groupShout?.enabled) !== groupShoutEnabled) errors.push('selection.mode, group-shout no-op state, and groupShout.enabled disagree.');
+if ((behaviors.groupShout?.skippedReason ?? null) !== expectedGroupShoutSkippedReason) errors.push('groupShout.skippedReason does not match the declared no-op state.');
+const chaseEnabled = selection.mode === 'poop-chase' || selection.mode === 'all';
+const expectedChaseSkippedReason = chaseEnabled && singletonSelf ? 'no-eligible-followers' : null;
+const expectedChaseVariant = chaseEnabled && !expectedChaseSkippedReason ? (selection.userCharacterId ? 'self-poop' : 'cursor-centipede') : null;
+if ((selection.chaseSkippedReason ?? null) !== expectedChaseSkippedReason) errors.push('selection.chaseSkippedReason does not match the selected self, people count, and mode.');
+if ((selection.chaseVariant ?? null) !== expectedChaseVariant) errors.push('selection.chaseVariant does not match the selected self and mode.');
 
 const poopChase = behaviors.poopChase || {};
 const numericRules = [
@@ -78,9 +98,19 @@ if (poopChase.enabled) {
   if (new Set(poopFollowers).size !== poopFollowers.length) errors.push('poopChase.followerIds must be unique.');
   if (poopFollowers.includes(poopLeader)) errors.push('poopChase leader cannot also be a follower.');
   for (const id of poopFollowers) if (!ids.includes(id)) errors.push(`Unknown poopChase follower: ${id}.`);
+  if (poopLeader !== selection.userCharacterId) errors.push('poopChase.leaderId must be the selected self and persistent poop source.');
+  const expectedFollowers = ids.filter((id) => id !== selection.userCharacterId);
+  if (JSON.stringify(poopFollowers) !== JSON.stringify(expectedFollowers)) errors.push('poopChase.followerIds must contain every other character in photo order.');
 }
-if ((selection.mode === 'poop-relay' || selection.mode === 'all') !== Boolean(poopChase.enabled)) errors.push('selection.mode and poopChase.enabled disagree.');
-if ((selection.mode === 'centipede' || selection.mode === 'all') !== Boolean(behaviors.centipede?.enabled)) errors.push('selection.mode and centipede.enabled disagree.');
+if ((poopChase.skippedReason ?? null) !== expectedChaseSkippedReason) errors.push('poopChase.skippedReason does not match the declared no-op state.');
+if (expectedChaseSkippedReason && !Array.isArray(poopChase.followerIds)) {
+  errors.push('Skipped poopChase must preserve explicit empty followerIds evidence.');
+}
+if (expectedChaseSkippedReason && ((poopChase.leaderId ?? null) !== null || (Array.isArray(poopChase.followerIds) && poopChase.followerIds.length))) {
+  errors.push('Skipped poopChase must not invent a leader or followers.');
+}
+if ((expectedChaseVariant === 'self-poop') !== Boolean(poopChase.enabled)) errors.push('selection chase variant and poopChase.enabled disagree.');
+if ((expectedChaseVariant === 'cursor-centipede') !== Boolean(behaviors.centipede?.enabled)) errors.push('selection chase variant and centipede.enabled disagree.');
 if (projectManifest) {
   if (projectManifest.name !== config.app?.name) errors.push('project-manifest name must match pet.config.json app.name.');
   if (projectManifest.people !== config.characters.length) errors.push('project-manifest people must match the configured character count.');
@@ -89,58 +119,64 @@ if (projectManifest) {
     errors.push('project-manifest selection must match pet.config.json.');
   }
   if (JSON.stringify(declared.prankExcludedCharacterIds || []) !== JSON.stringify(prankExcludedIds)) errors.push('project-manifest prankExcludedCharacterIds must match pet.config.json in order.');
+  if ((declared.chaseVariant ?? null) !== expectedChaseVariant) errors.push('project-manifest chaseVariant must match pet.config.json.');
+  if ((declared.groupShoutSkippedReason ?? null) !== expectedGroupShoutSkippedReason) errors.push('project-manifest groupShoutSkippedReason must match pet.config.json.');
+  if ((declared.chaseSkippedReason ?? null) !== expectedChaseSkippedReason) errors.push('project-manifest chaseSkippedReason must match pet.config.json.');
   if ((declared.leaderId ?? null) !== (poopChase.enabled ? poopLeader : null)) errors.push('project-manifest leaderId must match behaviors.json.');
   if (JSON.stringify(declared.followerIds || []) !== JSON.stringify(poopChase.enabled ? poopFollowers : [])) errors.push('project-manifest followerIds must match behaviors.json in order.');
+}
+
+if (args['selection-only']) {
+  if (errors.length) {
+    console.error(errors.map((error) => `- ${error}`).join('\n'));
+    process.exit(1);
+  }
+  console.log(`Project selection valid: ${project}`);
+  process.exit(0);
 }
 
 const sharp = loadSharp(project);
 sharp.cache(false);
 const spriteRoot = path.join(project, 'src', 'assets', 'sprites');
-const expectedGroups = ['crawl_right', 'crawl_left', 'idle_right', 'idle_left', 'centipede_right', 'centipede_left', 'shout', 'drag'];
 const uniqueFiles = new Set();
+const actionContract = deriveActionContract(config);
+const actionDrift = compareActionContract(actionContract, manifest);
+
+for (const id of actionDrift.duplicateCharacterIds) errors.push(`Duplicate manifest character: ${id}.`);
+for (const id of actionDrift.unexpectedCharacterIds) errors.push(`Unexpected manifest character: ${id}.`);
+for (const { characterId, action } of actionDrift.missingActions) {
+  errors.push(`${characterId} is missing canonical action ${action}.`);
+}
+for (const { characterId, action } of actionDrift.unexpectedActions) {
+  errors.push(`${characterId} has role drift: unexpected canonical action ${action}.`);
+}
+for (const drift of actionDrift.misassignedActions) {
+  errors.push(`Role drift: ${drift.action} belongs to ${drift.expectedCharacterId} but appears on ${drift.actualCharacterIds.join(', ')}.`);
+}
 
 for (const id of ids) {
   const entry = manifest.characters.find((character) => character.id === id);
   if (!entry) { errors.push(`Manifest is missing ${id}.`); continue; }
-  for (const group of expectedGroups) {
-    if (!Array.isArray(entry.frames?.[group]) || !entry.frames[group].length) {
-      errors.push(`${id} is missing frame group ${group}.`);
+  for (const action of actionContract.actionsByCharacter[id] || []) {
+    const descriptor = actionFrameDescriptor(action, id);
+    const relative = entry.frames?.[descriptor.group]?.[descriptor.index];
+    if (relative !== descriptor.relative) continue;
+    if (path.isAbsolute(relative) || relative.includes('..') || relative.includes(':')) {
+      errors.push(`${id} has unsafe sprite path: ${relative}`);
       continue;
     }
-    for (const relative of entry.frames[group]) {
-      if (path.isAbsolute(relative) || relative.includes('..') || relative.includes(':')) {
-        errors.push(`${id} has unsafe sprite path: ${relative}`);
-        continue;
+    uniqueFiles.add(relative);
+  }
+  if (actionContract.rolesByCharacter[id]?.chaseRole === 'centipede') {
+    for (const direction of ['right', 'left']) {
+      const head = entry.anchors?.[direction]?.head;
+      const mouth = entry.anchors?.[direction]?.mouth;
+      const rear = entry.anchors?.[direction]?.rear;
+      if (![head, mouth, rear].every((point) => Array.isArray(point) && point.length === 2 && point.every((value) => value >= 0 && value <= 1))) {
+        errors.push(`${id} has invalid ${direction} head/mouth/rear anchors.`);
+      } else if (Math.abs(head[0] - rear[0]) < 0.4) {
+        errors.push(`${id} ${direction} head and rear anchors are too close.`);
       }
-      uniqueFiles.add(relative);
-    }
-  }
-  const expectedShoutFrames = [1, 2, 3].map((frame) => `${id}/shout_${frame}.png`);
-  if (JSON.stringify(entry.frames?.shout || []) !== JSON.stringify(expectedShoutFrames)) {
-    errors.push(`${id} shout must contain exactly shout_1.png, shout_2.png, and shout_3.png in order.`);
-  }
-  const relayParticipants = new Set([poopLeader, ...poopFollowers].filter(Boolean));
-  const roleGroups = poopChase.enabled && relayParticipants.has(id)
-    ? ['poop_right', 'poop_left', 'eat_right', 'eat_left']
-    : [];
-  for (const group of roleGroups) {
-    if (!Array.isArray(entry.frames?.[group]) || !entry.frames[group].length) {
-      errors.push(`${id} is missing poop-chase frame group ${group}.`);
-      continue;
-    }
-    for (const relative of entry.frames[group]) {
-      if (path.isAbsolute(relative) || relative.includes('..') || relative.includes(':')) errors.push(`${id} has unsafe sprite path: ${relative}`);
-      else uniqueFiles.add(relative);
-    }
-  }
-  for (const direction of ['right', 'left']) {
-    const head = entry.anchors?.[direction]?.head;
-    const mouth = entry.anchors?.[direction]?.mouth;
-    const rear = entry.anchors?.[direction]?.rear;
-    if (![head, mouth, rear].every((point) => Array.isArray(point) && point.length === 2 && point.every((value) => value >= 0 && value <= 1))) {
-      errors.push(`${id} has invalid ${direction} head/mouth/rear anchors.`);
-    } else if (Math.abs(head[0] - rear[0]) < 0.4) {
-      errors.push(`${id} ${direction} head and rear anchors are too close.`);
     }
   }
 }

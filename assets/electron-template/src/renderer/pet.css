@@ -55,6 +55,18 @@ body {
   animation: wobble 0.7s ease-in-out infinite alternate;
 }
 
+body[data-effect="flies"][data-direction="right"] #effect {
+  right: auto;
+  left: calc((100% - var(--sprite-size, 112px)) / 2 + 4px);
+  bottom: 32px;
+}
+
+body[data-effect="flies"][data-direction="left"] #effect {
+  right: calc((100% - var(--sprite-size, 112px)) / 2 + 4px);
+  left: auto;
+  bottom: 32px;
+}
+
 html.paused #effect,
 html.paused #bubble {
   animation-play-state: paused;
@@ -66,14 +78,14 @@ html.paused #bubble {
   z-index: 3;
   top: 5px;
   left: 50%;
-  min-width: 54px;
-  max-width: 136px;
-  padding: 7px 11px 8px;
+  min-width: 50px;
+  max-width: 112px;
+  padding: 6px 9px 7px;
   border: 3px solid #26202c;
   border-radius: 16px;
   background: #fffdf5;
   color: #d12635;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 900;
   line-height: 1.05;
   text-align: center;
@@ -99,6 +111,79 @@ html.paused #bubble {
 #bubble.visible {
   display: block;
   animation: pop 150ms ease-out;
+}
+
+body[data-action="shout"][data-shout-frame="1"] #bubble {
+  transform: translateX(-50%) scale(1.08) rotate(2deg);
+  box-shadow: 0 4px 0 rgba(38, 32, 44, 0.2);
+}
+
+body[data-action="shout"][data-shout-frame="2"] #bubble {
+  transform: translateX(-50%) scale(1.08) rotate(-3deg);
+  border-width: 4px;
+  box-shadow: 0 5px 0 rgba(38, 32, 44, 0.24), 0 0 0 5px rgba(209, 38, 53, 0.1);
+}
+
+body[data-action="shout"][data-shout-frame="2"] #sprite {
+  transform: translateX(-50%) scale(1.12);
+}
+
+body[data-shout-recipient="true"] #sprite {
+  bottom: 1px;
+  transform: translateX(-50%) scale(1.48);
+  transform-origin: center bottom;
+  filter: hue-rotate(var(--hue-rotate, 0deg)) drop-shadow(0 5px 5px rgba(87, 55, 0, 0.28));
+}
+
+body[data-shout-recipient="true"] #stage::before {
+  content: "👑 本人";
+  position: absolute;
+  z-index: 4;
+  top: 0;
+  left: 50%;
+  padding: 2px 6px 3px;
+  border: 1px solid #8f5b00;
+  border-radius: 999px;
+  background: #ffe28a;
+  color: #6b3d00;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  white-space: nowrap;
+  transform: translateX(-50%) rotate(-4deg);
+  box-shadow: 0 2px 0 rgba(97, 59, 0, 0.22);
+}
+
+body[data-action^="eat_"] #bubble {
+  top: 2px;
+  border-color: #5c351e;
+  background: #fff2c9;
+  color: #6f3b15;
+  transform: translateX(-50%) rotate(3deg) scale(1.08);
+}
+
+body[data-action^="eat_"] #bubble::after {
+  border-color: #5c351e;
+  background: #fff2c9;
+}
+
+body[data-phrase-kind="grandpa"] #bubble {
+  border-color: #4d245d;
+  background: #fff7ff;
+  color: #7b2b91;
+}
+
+body[data-phrase-kind="grandpa"] #bubble::after {
+  border-color: #4d245d;
+  background: #fff7ff;
+}
+
+body[data-phrase-kind="grandpa"][data-shout-frame="1"] #sprite {
+  transform: translateX(-50%) translateY(2px) scale(1.1) rotate(3deg);
+}
+
+body[data-phrase-kind="grandpa"][data-shout-frame="2"] #sprite {
+  transform: translateX(-50%) translateY(5px) scale(1.17) rotate(-5deg);
 }
 
 @keyframes pop {

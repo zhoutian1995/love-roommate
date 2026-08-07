@@ -5,8 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { fail, parseArgs, readJson, slugify, writeJson } from './lib/common.mjs';
 
 const args = parseArgs(process.argv.slice(2));
-if (!args.name || !args.out || !args.people || !args.source || !args.mode || !args.self || args['prank-excluded'] === undefined || !args.consent) {
-  fail('Usage: node create_project.mjs --name "App Name" --out <output-root> --source <photo> --people <1-8> --mode <normal|centipede|poop-relay|all> --self <none|person-N> --prank-excluded <none|person-N,person-N> --consent confirmed [--names "A,B"] [--leader person-N --followers "person-N,person-N"]');
+if (!args.name || !args.out || !args.people || !args.source || !args.mode || !args.self || !args.consent) {
+  fail('Usage: node create_project.mjs --name "App Name" --out <output-root> --source <photo> --people <1-8> --mode <normal|group-shout|poop-chase|all> --self <none|person-N> --consent confirmed [--names "A,B"]');
+}
+for (const deprecated of ['prank-excluded', 'leader', 'followers']) {
+  if (args[deprecated] !== undefined) fail(`--${deprecated} is no longer accepted; prank roles are derived from --self and the selected mode.`);
 }
 
 const appName = String(args.name).trim();
@@ -17,46 +20,30 @@ if (!Number.isInteger(people) || people < 1 || people > 8) fail('--people must b
 const source = path.resolve(args.source);
 if (!fs.existsSync(source) || !fs.statSync(source).isFile()) fail(`Source photo does not exist: ${source}`);
 const mode = String(args.mode);
-if (!['normal', 'centipede', 'poop-relay', 'all'].includes(mode)) fail('--mode must be normal, centipede, poop-relay, or all.');
+if (!['normal', 'group-shout', 'poop-chase', 'all'].includes(mode)) fail('--mode must be normal, group-shout, poop-chase, or all.');
 
 const names = String(args.names || '')
   .split(',')
   .map((name) => name.trim())
   .filter(Boolean);
-const hues = [0, 34, 72, 118, 168, 216, 270, 318];
 const characters = Array.from({ length: people }, (_, index) => ({
   id: `person-${index + 1}`,
   displayName: names[index] || `人物 ${index + 1}`,
-  hueRotate: hues[index]
+  hueRotate: 0
 }));
 const ids = characters.map((character) => character.id);
 const userCharacterId = args.self === 'none' ? null : String(args.self);
 if (userCharacterId && !ids.includes(userCharacterId)) fail('--self must be none or one of the generated person-N ids.');
-const prankExcludedInput = String(args['prank-excluded']);
-const explicitPrankExcludedIds = prankExcludedInput === 'none'
-  ? []
-  : prankExcludedInput.split(',').map((id) => id.trim()).filter(Boolean);
-if (prankExcludedInput !== 'none' && !explicitPrankExcludedIds.length) fail('--prank-excluded must be none or a comma-separated list of generated person-N ids.');
-if (new Set(explicitPrankExcludedIds).size !== explicitPrankExcludedIds.length) fail('--prank-excluded must not contain duplicates.');
-for (const id of explicitPrankExcludedIds) if (!ids.includes(id)) fail(`Unknown prank-excluded character: ${id}`);
-const prankExcludedCharacterIds = [
-  ...(userCharacterId ? [userCharacterId] : []),
-  ...explicitPrankExcludedIds.filter((id) => id !== userCharacterId)
-];
-const poopRelayEnabled = mode === 'poop-relay' || mode === 'all';
-const poopLeader = args.leader ? String(args.leader) : null;
-const poopFollowers = String(args.followers || '')
-  .split(',')
-  .map((id) => id.trim())
-  .filter(Boolean);
-if (poopRelayEnabled) {
-  if (people < 2) fail('poop-relay mode requires at least two people.');
-  if (!ids.includes(poopLeader)) fail('--leader must identify one generated character when poop-relay is enabled.');
-  if (!poopFollowers.length) fail('--followers must contain at least one ordered character when poop-relay is enabled.');
-  if (new Set(poopFollowers).size !== poopFollowers.length) fail('--followers must not contain duplicates.');
-  if (poopFollowers.includes(poopLeader)) fail('The poop-relay leader cannot also be a follower.');
-  for (const id of poopFollowers) if (!ids.includes(id)) fail(`Unknown poop-relay follower: ${id}`);
-}
+const prankExcludedCharacterIds = userCharacterId ? [userCharacterId] : [];
+const groupShoutSelected = mode === 'group-shout' || mode === 'all';
+const chaseEnabled = mode === 'poop-chase' || mode === 'all';
+const singletonSelf = people === 1 && userCharacterId === ids[0];
+const groupShoutSkippedReason = groupShoutSelected && singletonSelf ? 'no-eligible-participants' : null;
+const chaseSkippedReason = chaseEnabled && singletonSelf ? 'no-eligible-followers' : null;
+const groupShoutEnabled = groupShoutSelected && !groupShoutSkippedReason;
+const chaseVariant = chaseEnabled && !chaseSkippedReason ? (userCharacterId ? 'self-poop' : 'cursor-centipede') : null;
+const poopLeader = chaseVariant === 'self-poop' ? userCharacterId : null;
+const poopFollowers = poopLeader ? ids.filter((id) => id !== poopLeader) : [];
 
 const outputRoot = path.resolve(args.out);
 if (fs.existsSync(outputRoot)) fail(`Refusing to overwrite existing output: ${outputRoot}`);
@@ -91,15 +78,24 @@ try {
   const config = readJson(configPath);
   config.app = { name: appName, id: appId, version: '1.0.0' };
   config.characters = characters;
-  config.selection = { mode, userCharacterId, prankExcludedCharacterIds };
+  config.selection = {
+    mode,
+    userCharacterId,
+    prankExcludedCharacterIds,
+    chaseVariant,
+    groupShoutSkippedReason,
+    chaseSkippedReason
+  };
   writeJson(configPath, config);
 
   const behaviorsPath = path.join(project, 'src', 'config', 'behaviors.json');
   const behaviors = readJson(behaviorsPath);
-  behaviors.centipede.enabled = mode === 'centipede' || mode === 'all';
-  behaviors.poopChase.enabled = poopRelayEnabled;
-  behaviors.poopChase.leaderId = poopLeader || characters[0].id;
-  behaviors.poopChase.followerIds = poopRelayEnabled ? poopFollowers : [];
+  behaviors.groupShout = { ...behaviors.groupShout, enabled: groupShoutEnabled, skippedReason: groupShoutSkippedReason };
+  behaviors.centipede.enabled = chaseVariant === 'cursor-centipede';
+  behaviors.poopChase.enabled = chaseVariant === 'self-poop';
+  behaviors.poopChase.leaderId = poopLeader;
+  behaviors.poopChase.followerIds = poopFollowers;
+  behaviors.poopChase.skippedReason = chaseSkippedReason;
   writeJson(behaviorsPath, behaviors);
 
   const manifestPath = path.join(project, 'src', 'assets', 'sprites', 'manifest.json');
@@ -128,8 +124,11 @@ try {
       mode,
       userCharacterId,
       prankExcludedCharacterIds,
-      leaderId: poopRelayEnabled ? poopLeader : null,
-      followerIds: poopRelayEnabled ? poopFollowers : []
+      chaseVariant,
+      groupShoutSkippedReason,
+      chaseSkippedReason,
+      leaderId: poopLeader,
+      followerIds: poopFollowers
     },
     consent: { allSubjectsAuthorized: true }
   });

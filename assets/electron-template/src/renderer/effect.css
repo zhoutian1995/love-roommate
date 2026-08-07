@@ -14,3 +14,7 @@ img {
   pointer-events: none;
   filter: drop-shadow(0 0 2px rgba(255, 238, 185, 0.95)) drop-shadow(0 2px 2px rgba(0, 0, 0, 0.55));
 }
+
+body[data-asset="poop"] img {
+  filter: drop-shadow(0 1px 1.5px rgba(45, 31, 24, 0.35));
+}

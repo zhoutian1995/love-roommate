@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>透明蒙版修正</title>
+  <link rel="stylesheet" href="./editor.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>透明蒙版修正</h1>
+        <p>只在本机修改透明区域，图片不会从此页面上传。</p>
+      </div>
+      <div class="finish-actions">
+        <button id="cancel" class="button secondary" type="button">取消</button>
+        <button id="save" class="button primary" type="button">保存并关闭</button>
+      </div>
+    </header>
+
+    <section class="workspace" aria-label="蒙版修正工作区">
+      <aside class="toolbar" aria-label="编辑工具">
+        <fieldset>
+          <legend>画笔模式</legend>
+          <button class="tool active" type="button" data-mode="erase" aria-pressed="true">擦除背景</button>
+          <button class="tool" type="button" data-mode="restore" aria-pressed="false">恢复人物</button>
+        </fieldset>
+
+        <label for="radius">画笔大小 <output id="radius-value">28</output></label>
+        <input id="radius" type="range" min="1" max="120" value="28">
+
+        <label for="hardness">画笔硬度 <output id="hardness-value">100%</output></label>
+        <input id="hardness" type="range" min="10" max="100" value="100">
+
+        <label for="zoom">缩放</label>
+        <select id="zoom">
+          <option value="100" selected>100%</option>
+          <option value="200">200%</option>
+          <option value="400">400%</option>
+          <option value="800">800%</option>
+        </select>
+
+        <div class="history-actions">
+          <button id="undo" type="button" disabled>撤销</button>
+          <button id="redo" type="button" disabled>重做</button>
+          <button id="reset" type="button" disabled>重置</button>
+        </div>
+
+        <p class="hint">按住空格或鼠标中键拖动画布。Ctrl+Z 撤销，Ctrl+Shift+Z 重做。</p>
+      </aside>
+
+      <div id="viewport" class="viewport">
+        <canvas id="editor-canvas" aria-label="透明蒙版编辑画布" tabindex="0"></canvas>
+        <div id="loading" class="loading">正在加载本地图像…</div>
+      </div>
+    </section>
+
+    <footer class="statusbar">
+      <span id="status" role="status" aria-live="polite">准备加载</span>
+      <span id="stroke-summary">擦除 0 笔 · 恢复 0 笔</span>
+    </footer>
+  </main>
+
+  <dialog id="confirm-dialog">
+    <form method="dialog">
+      <h2 id="confirm-title">确认操作</h2>
+      <p id="confirm-message"></p>
+      <div class="dialog-actions">
+        <button value="dismiss" type="submit">返回编辑</button>
+        <button id="confirm-action" value="confirm" class="danger" type="submit">确认</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="./editor.js"></script>
+</body>
+</html>

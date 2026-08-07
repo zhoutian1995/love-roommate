@@ -32,6 +32,7 @@ function processCoverage(pids, durationMs = 60000) {
     countMax: pids.length,
     peakCount: pids.length,
     observedPids: pids,
+    continuouslyObservedPids: pids,
     observedProcesses: processes,
     typePeakCounts: {
       Browser: 1,
@@ -43,7 +44,22 @@ function processCoverage(pids, durationMs = 60000) {
   };
 }
 
-function withProcesses(phase, pids) {
+function visiblePetWindowEvidence(ids, durationMs, rendererPid = 3) {
+  const sampleCount = Math.max(1, Math.ceil(durationMs / 1000));
+  return {
+    metricSource: 'BrowserWindow.isVisible/isDestroyed',
+    sampleCount,
+    countMin: ids.length,
+    countMax: ids.length,
+    continuouslyVisibleIds: ids,
+    samples: Array.from({ length: sampleCount }, (_, index) => ({
+      atMs: index * 1000,
+      windows: ids.map((id) => ({ id, pid: rendererPid, visible: true, destroyed: false }))
+    }))
+  };
+}
+
+function withProcesses(phase, pids, petIds = []) {
   const durationMs = phase.durationMs;
   const durationSeconds = durationMs / 1000;
   return {
@@ -54,15 +70,17 @@ function withProcesses(phase, pids) {
       eventLoopDelays: Math.max(1, Math.floor(durationSeconds * 0.9)),
       processMetrics: Math.max(1, Math.floor(durationSeconds * 0.9))
     },
-    processes: processCoverage(pids, durationMs)
+    processes: processCoverage(pids, durationMs),
+    petWindows: visiblePetWindowEvidence(petIds, durationMs, pids[2])
   };
 }
 
-function v3ReportFields(runtimeFingerprint) {
+function v4ReportFields(runtimeFingerprint) {
   return {
     schemaVersion: audit.PERFORMANCE_REPORT_SCHEMA_VERSION,
     fingerprintSchemaVersion: audit.PERFORMANCE_FINGERPRINT_SCHEMA_VERSION,
     runtimeFingerprint,
+    candidateFingerprint: 'f'.repeat(64),
     startupMeasurement: {
       start: 'runner-before-executable-spawn',
       end: 'all-pet-windows-presented'
@@ -78,7 +96,7 @@ function v3ReportFields(runtimeFingerprint) {
 }
 
 function evaluationContext(report) {
-  return { expectedRuntimeFingerprint: report.runtimeFingerprint };
+  return { expectedRuntimeFingerprint: report.runtimeFingerprint, expectedCandidateFingerprint: report.candidateFingerprint };
 }
 
 function createRuntimeFixture(prefix) {
@@ -94,6 +112,48 @@ function createRuntimeFixture(prefix) {
     devDependencies: { electron: '41.0.2' }
   }), 'utf8');
   return temp;
+}
+
+function healthyPerformanceReport(windowCount) {
+  const phase = {
+    durationMs: 60000,
+    frameIntervalMs: { p95: 34, max: 46 },
+    eventLoopDelayMs: { p95: 12, max: 35 },
+    cpuPercent: { average: 6.5, max: 18, longestAboveThresholdSeconds: 2 },
+    memoryMb: { workingSetMax: 700, privateMax: 320, max: 320, gateMetric: 'private-bytes' }
+  };
+  const basePids = Array.from({ length: windowCount + 3 }, (_, index) => 100 + index);
+  const centipedePids = [...basePids, 100 + basePids.length];
+  const allPids = [...centipedePids, 100 + centipedePids.length];
+  const petIds = Array.from({ length: windowCount }, (_, index) => `person-${index + 1}`);
+  const report = {
+    ...v4ReportFields('a'.repeat(64)),
+    expectedWindowCount: windowCount,
+    expectedPetIds: petIds,
+    windowCount,
+    startupVisibleMs: 1700,
+    metricSource: audit.PERFORMANCE_METRIC_SOURCE,
+    phases: {
+      idle: withProcesses(phase, basePids, petIds),
+      centipede: withProcesses(phase, centipedePids, petIds),
+      'poop-chase': withProcesses(phase, allPids, petIds),
+      'dad-shout': withProcesses({ ...phase, durationMs: 9000 }, allPids, petIds),
+      'grandpa-shout': withProcesses({ ...phase, durationMs: 9000 }, allPids, petIds),
+      soak: withProcesses({ ...phase, durationMs: 600000 }, allPids, petIds),
+      pause: withProcesses({ ...phase, cpuPercent: { average: 2, max: 4, longestAboveThresholdSeconds: 0 } }, allPids, petIds)
+    },
+    processLifecycle: {
+      policy: 'reuse-hidden-effect-renderers',
+      idlePeak: basePids.length,
+      specialModePeak: allPids.length,
+      postSpecialPeak: allPids.length,
+      additionalPeak: 2,
+      retainedAfterSpecial: 2
+    },
+    soak: { memoryGrowthMb: 18, memoryGrowthMetric: 'private-bytes' },
+    pauseComparison: { activePhase: 'poop-chase', activeAverageCpuPercent: 6.5, pausedAverageCpuPercent: 2, ratio: 0.308, tickerRatio: 0.2 }
+  };
+  return report;
 }
 
 test('performance audit module is bundled with every generated project', () => {
@@ -118,44 +178,69 @@ test('performance thresholds are fail-closed and match the Windows acceptance co
 });
 
 test('healthy five-window report passes every performance gate', { skip: !available }, () => {
-  const phase = {
-    durationMs: 60000,
-    frameIntervalMs: { p95: 34, max: 46 },
-    eventLoopDelayMs: { p95: 12, max: 35 },
-    cpuPercent: { average: 6.5, max: 18, longestAboveThresholdSeconds: 2 },
-    memoryMb: { workingSetMax: 700, privateMax: 320, max: 320, gateMetric: 'private-bytes' }
-  };
-  const report = {
-    ...v3ReportFields('a'.repeat(64)),
-    expectedWindowCount: 5,
-    windowCount: 5,
-    startupVisibleMs: 1700,
-    metricSource: audit.PERFORMANCE_METRIC_SOURCE,
-    phases: {
-      idle: withProcesses(phase, [100, 101, 102, 103, 104, 105, 106, 107]),
-      centipede: withProcesses(phase, [100, 101, 102, 103, 104, 105, 106, 107, 108]),
-      'poop-chase': withProcesses(phase, [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]),
-      'dad-shout': withProcesses({ ...phase, durationMs: 9000 }, [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]),
-      'grandpa-shout': withProcesses({ ...phase, durationMs: 9000 }, [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]),
-      soak: withProcesses({ ...phase, durationMs: 600000 }, [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]),
-      pause: withProcesses({ ...phase, cpuPercent: { average: 2, max: 4, longestAboveThresholdSeconds: 0 } }, [100, 101, 102, 103, 104, 105, 106, 107, 108, 109])
-    },
-    processLifecycle: {
-      policy: 'reuse-hidden-effect-renderers',
-      idlePeak: 8,
-      specialModePeak: 10,
-      postSpecialPeak: 10,
-      additionalPeak: 2,
-      retainedAfterSpecial: 2
-    },
-    soak: { memoryGrowthMb: 18, memoryGrowthMetric: 'private-bytes' },
-    pauseComparison: { activePhase: 'poop-chase', activeAverageCpuPercent: 6.5, pausedAverageCpuPercent: 2, ratio: 0.308, tickerRatio: 0.2 }
+  const report = healthyPerformanceReport(5);
+
+  assert.deepEqual(audit.evaluatePerformanceReport(report, undefined, evaluationContext(report)), { pass: true, violations: [] });
+});
+
+test('healthy eight-window report passes the unchanged Windows performance thresholds', { skip: !available }, () => {
+  const report = healthyPerformanceReport(8);
+  assert.deepEqual(audit.evaluatePerformanceReport(report, undefined, evaluationContext(report)), { pass: true, violations: [] });
+});
+
+test('eight visible pet windows may share one continuously observed renderer process', { skip: !available }, () => {
+  const report = healthyPerformanceReport(8);
+  const sharedPids = [101, 102, 103, 104];
+  for (const phase of Object.values(report.phases)) {
+    phase.processes = processCoverage(sharedPids, phase.durationMs);
+    phase.petWindows = visiblePetWindowEvidence(report.expectedPetIds, phase.durationMs, 103);
+  }
+  report.processLifecycle = {
+    policy: 'reuse-hidden-effect-renderers',
+    idlePeak: 4,
+    specialModePeak: 4,
+    postSpecialPeak: 4,
+    additionalPeak: 0,
+    retainedAfterSpecial: 0
   };
 
   assert.deepEqual(audit.evaluatePerformanceReport(report, undefined, evaluationContext(report)), { pass: true, violations: [] });
 });
 
+test('shared renderer process model is enabled before Electron becomes ready', () => {
+  const switchIndex = mainSource.indexOf("app.commandLine.appendSwitch('process-per-site')");
+  const readyIndex = mainSource.indexOf('app.whenReady()');
+  assert.ok(switchIndex >= 0, 'main process must enable process-per-site');
+  assert.ok(readyIndex >= 0 && switchIndex < readyIndex, 'process-per-site must be configured before app.whenReady');
+});
+
+test('eight-window report fails closed when expectedWindowCount is missing', { skip: !available }, () => {
+  const report = healthyPerformanceReport(8);
+  delete report.expectedWindowCount;
+  const result = audit.evaluatePerformanceReport(report, undefined, evaluationContext(report));
+  assert.equal(result.pass, false);
+  assert.ok(result.violations.some((item) => item.code === 'window-count'));
+});
+
+test('eight-window report fails closed when expectedWindowCount is wrong', { skip: !available }, () => {
+  const report = healthyPerformanceReport(8);
+  report.expectedWindowCount = 5;
+  const result = audit.evaluatePerformanceReport(report, undefined, evaluationContext(report));
+  assert.equal(result.pass, false);
+  assert.ok(result.violations.some((item) => item.code === 'window-count'));
+});
+
+test('eight-window report fails closed when one pet window disappears during any phase', { skip: !available }, () => {
+  const report = healthyPerformanceReport(8);
+  const missing = report.phases.soak.petWindows.samples.at(-1);
+  missing.windows = missing.windows.filter((entry) => entry.id !== 'person-8');
+  const result = audit.evaluatePerformanceReport(report, undefined, evaluationContext(report));
+  assert.equal(result.pass, false);
+  assert.ok(result.violations.some((item) => item.code === 'pet-window-coverage'));
+});
+
 test('performance evaluation reports every threshold violation instead of silently relaxing limits', { skip: !available }, () => {
+  const petIds = ['person-1', 'person-2', 'person-3', 'person-4', 'person-5'];
   const phase = {
     durationMs: 60000,
     frameIntervalMs: { p95: 55, max: 180 },
@@ -164,19 +249,20 @@ test('performance evaluation reports every threshold violation instead of silent
     memoryMb: { workingSetMax: 900, privateMax: 501, max: 501, gateMetric: 'private-bytes' }
   };
   const report = {
-    ...v3ReportFields('b'.repeat(64)),
+    ...v4ReportFields('b'.repeat(64)),
     expectedWindowCount: 5,
+    expectedPetIds: petIds,
     windowCount: 4,
     startupVisibleMs: 5001,
     metricSource: audit.PERFORMANCE_METRIC_SOURCE,
     phases: {
-      idle: withProcesses(phase, [1, 2, 3, 4, 5, 6]),
-      centipede: withProcesses(phase, [1, 2, 3, 4, 5, 6, 7]),
-      'poop-chase': withProcesses(phase, [1, 2, 3, 4, 5, 6, 7, 8]),
-      'dad-shout': withProcesses(phase, [1, 2, 3, 4, 5, 6, 7, 8]),
-      'grandpa-shout': withProcesses(phase, [1, 2, 3, 4, 5, 6, 7, 8]),
-      soak: withProcesses(phase, [1, 2, 3, 4, 5, 6, 7, 8]),
-      pause: withProcesses(phase, [1, 2, 3, 4, 5, 6, 7, 8])
+      idle: withProcesses(phase, [1, 2, 3, 4, 5, 6], petIds),
+      centipede: withProcesses(phase, [1, 2, 3, 4, 5, 6, 7], petIds),
+      'poop-chase': withProcesses(phase, [1, 2, 3, 4, 5, 6, 7, 8], petIds),
+      'dad-shout': withProcesses(phase, [1, 2, 3, 4, 5, 6, 7, 8], petIds),
+      'grandpa-shout': withProcesses(phase, [1, 2, 3, 4, 5, 6, 7, 8], petIds),
+      soak: withProcesses(phase, [1, 2, 3, 4, 5, 6, 7, 8], petIds),
+      pause: withProcesses(phase, [1, 2, 3, 4, 5, 6, 7, 8], petIds)
     },
     processLifecycle: {
       policy: 'reuse-hidden-effect-renderers',
@@ -225,6 +311,20 @@ test('runtime fingerprint is stable when portable packaging prunes package metad
   const after = audit.runtimeFingerprintForProject(temp);
   assert.equal(after, before, 'packaging-only package.json pruning must not invalidate an otherwise identical runtime');
 });
+
+test('candidate fingerprint ignores project-specific people configuration but changes with runtime code', { skip: !available }, () => {
+  const temp = createRuntimeFixture('love-roommate-performance-candidate-');
+  const configDir = path.join(temp, 'src', 'config');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, 'pet.config.json'), JSON.stringify({ characters: [{ id: 'person-1' }] }), 'utf8');
+  const before = audit.candidateFingerprintForProject(temp);
+  fs.writeFileSync(path.join(configDir, 'pet.config.json'), JSON.stringify({ characters: Array.from({ length: 8 }, (_, index) => ({ id: `person-${index + 1}` })) }), 'utf8');
+  const afterConfig = audit.candidateFingerprintForProject(temp);
+  fs.appendFileSync(path.join(temp, 'src', 'main.js'), '\nruntime-change', 'utf8');
+  const afterCode = audit.candidateFingerprintForProject(temp);
+  assert.equal(afterConfig, before);
+  assert.notEqual(afterCode, before);
+});
 test('phase summarizer computes frame, event-loop, CPU, and memory statistics', { skip: !available }, () => {
   const summary = audit.summarizePerformancePhase({
     durationMs: 60000,
@@ -263,6 +363,7 @@ test('phase summarizer computes frame, event-loop, CPU, and memory statistics', 
     countMax: 4,
     peakCount: 4,
     observedPids: [11, 12, 13, 14],
+    continuouslyObservedPids: [11, 12, 13],
     observedProcesses: [11, 12, 13, 14].map((pid) => ({ pid, creationTime: null, type: 'Unknown', serviceName: '', name: '' })),
     typePeakCounts: { Unknown: 4 },
     pidSets: [
@@ -274,6 +375,14 @@ test('phase summarizer computes frame, event-loop, CPU, and memory statistics', 
       pids: [11, 12, 13, 14],
       processes: [11, 12, 13, 14].map((pid) => ({ pid, creationTime: null, type: 'Unknown', serviceName: '', name: '' }))
     }]
+  });
+  assert.deepEqual(summary.petWindows, {
+    metricSource: 'BrowserWindow.isVisible/isDestroyed',
+    sampleCount: 4,
+    countMin: 0,
+    countMax: 0,
+    continuouslyVisibleIds: [],
+    samples: [0, 1000, 2000, 3000].map((atMs) => ({ atMs, windows: [] }))
   });
 });
 
@@ -312,6 +421,7 @@ test('process coverage is fail-closed and rejects hidden-renderer growth after s
 });
 
 test('summed working set remains diagnostic while private bytes enforce the 500MB memory gate', { skip: !available }, () => {
+  const petIds = ['person-1', 'person-2', 'person-3', 'person-4', 'person-5'];
   const phase = {
     durationMs: 60000,
     frameIntervalMs: { p95: 34, max: 45 },
@@ -320,12 +430,13 @@ test('summed working set remains diagnostic while private bytes enforce the 500M
     memoryMb: { workingSetMax: 1000, privateMax: 430, max: 430, start: 420, end: 430, gateMetric: 'private-bytes' }
   };
   const report = {
-    ...v3ReportFields('d'.repeat(64)),
+    ...v4ReportFields('d'.repeat(64)),
     expectedWindowCount: 5,
+    expectedPetIds: petIds,
     windowCount: 5,
     startupVisibleMs: 1500,
     metricSource: audit.PERFORMANCE_METRIC_SOURCE,
-    phases: Object.fromEntries(['idle', 'centipede', 'poop-chase', 'dad-shout', 'grandpa-shout', 'soak', 'pause'].map((name) => [name, withProcesses(phase, [1, 2, 3, 4, 5, 6])])),
+    phases: Object.fromEntries(['idle', 'centipede', 'poop-chase', 'dad-shout', 'grandpa-shout', 'soak', 'pause'].map((name) => [name, withProcesses(phase, [1, 2, 3, 4, 5, 6], petIds)])),
     processLifecycle: {
       policy: 'reuse-hidden-effect-renderers',
       idlePeak: 6,
@@ -340,6 +451,7 @@ test('summed working set remains diagnostic while private bytes enforce the 500M
   assert.deepEqual(audit.evaluatePerformanceReport(report, undefined, evaluationContext(report)), { pass: true, violations: [] });
 });
 test('paused phase may stop the animation ticker without failing active-frame thresholds', { skip: !available }, () => {
+  const petIds = ['person-1', 'person-2', 'person-3', 'person-4', 'person-5'];
   const active = {
     durationMs: 60000,
     frameIntervalMs: { p95: 34, max: 45 },
@@ -348,23 +460,24 @@ test('paused phase may stop the animation ticker without failing active-frame th
     memoryMb: { workingSetMax: 650, privateMax: 300, max: 300, gateMetric: 'private-bytes' }
   };
   const report = {
-    ...v3ReportFields('c'.repeat(64)),
+    ...v4ReportFields('c'.repeat(64)),
     expectedWindowCount: 5,
+    expectedPetIds: petIds,
     windowCount: 5,
     startupVisibleMs: 1500,
     metricSource: audit.PERFORMANCE_METRIC_SOURCE,
     phases: {
-      idle: withProcesses(active, [1, 2, 3, 4, 5, 6]),
-      centipede: withProcesses(active, [1, 2, 3, 4, 5, 6, 7]),
-      'poop-chase': withProcesses(active, [1, 2, 3, 4, 5, 6, 7, 8]),
-      'dad-shout': withProcesses(active, [1, 2, 3, 4, 5, 6, 7, 8]),
-      'grandpa-shout': withProcesses(active, [1, 2, 3, 4, 5, 6, 7, 8]),
-      soak: withProcesses(active, [1, 2, 3, 4, 5, 6, 7, 8]),
+      idle: withProcesses(active, [1, 2, 3, 4, 5, 6], petIds),
+      centipede: withProcesses(active, [1, 2, 3, 4, 5, 6, 7], petIds),
+      'poop-chase': withProcesses(active, [1, 2, 3, 4, 5, 6, 7, 8], petIds),
+      'dad-shout': withProcesses(active, [1, 2, 3, 4, 5, 6, 7, 8], petIds),
+      'grandpa-shout': withProcesses(active, [1, 2, 3, 4, 5, 6, 7, 8], petIds),
+      soak: withProcesses(active, [1, 2, 3, 4, 5, 6, 7, 8], petIds),
       pause: withProcesses({
         ...active,
         frameIntervalMs: { p95: 500, max: 500 },
         cpuPercent: { average: 1, max: 2, longestAboveThresholdSeconds: 0 }
-      }, [1, 2, 3, 4, 5, 6, 7, 8])
+      }, [1, 2, 3, 4, 5, 6, 7, 8], petIds)
     },
     processLifecycle: {
       policy: 'reuse-hidden-effect-renderers',
@@ -385,8 +498,15 @@ test('runtime performance helpers suppress motion-only IPC and slow the shared t
   const state = { action: 'idle_right', frame: 1.2, phrase: '', effect: null, effectSize: 24, direction: 'right', x: 10, y: 20, vx: 3, vy: 4 };
   assert.equal(audit.petRenderKey(state), audit.petRenderKey({ ...state, x: 900, y: 700, vx: -20, vy: 15 }));
   assert.notEqual(audit.petRenderKey(state), audit.petRenderKey({ ...state, frame: 2.1 }));
+  assert.notEqual(audit.petRenderKey(state), audit.petRenderKey({ ...state, shoutRecipient: true }));
   assert.equal(audit.nextTickerDelay(false), 33);
   assert.ok(audit.nextTickerDelay(true) >= audit.nextTickerDelay(false) * 5);
+});
+
+test('paused pets still process drag positions without resuming animation', () => {
+  assert.match(mainSource, /if \(engine\.paused && dragStates\.size === 0\)/);
+  assert.match(mainSource, /const snapshot = engine\.paused \? engine\.snapshot\(\) : engine\.update\(dt, cursor\)/);
+  assert.match(mainSource, /scheduleTicker\(engine\.paused && dragStates\.size > 0 \? nextTickerDelay\(false\) : undefined\)/);
 });
 
 test('main runtime uses the adaptive ticker, state caches, and lazy effect windows', () => {
@@ -396,4 +516,12 @@ test('main runtime uses the adaptive ticker, state caches, and lazy effect windo
   const readyBlock = mainSource.slice(mainSource.indexOf('app.whenReady().then'), mainSource.indexOf("app.on('before-quit'"));
   assert.doesNotMatch(readyBlock, /createCursorPoopWindow\(\)/);
   assert.doesNotMatch(readyBlock, /createDroppingPoopWindow\(\)/);
+  assert.match(mainSource, /petWindows:\s*config\.characters\.map[\s\S]*isVisible\(\)[\s\S]*isDestroyed\(\)/);
+});
+
+test('inactive effect windows are destroyed while native window updates are safe', () => {
+  assert.match(mainSource, /function destroyCursorPoopWindow\(\)[\s\S]*cursorPoopWindow\.destroy\(\)[\s\S]*cursorPoopWindow = null/);
+  assert.match(mainSource, /function destroyDroppingPoopWindow\(\)[\s\S]*droppingPoopWindow\.destroy\(\)[\s\S]*droppingPoopWindow = null/);
+  assert.match(mainSource, /if \(!dropping\) \{[\s\S]*destroyDroppingPoopWindow\(\)/);
+  assert.match(mainSource, /const poopWindow = showPoop && nativeWindowUpdatesAllowed \? ensureCursorPoopWindow\(\) : cursorPoopWindow;[\s\S]*if \(nativeWindowUpdatesAllowed && !showPoop\) destroyCursorPoopWindow\(\)/);
 });

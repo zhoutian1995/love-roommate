@@ -9,27 +9,37 @@
     "grandpa": "CommandOrControl+Alt+G",
     "centipede": "CommandOrControl+Alt+C",
     "poopChase": "CommandOrControl+Alt+E",
-    "pause": "CommandOrControl+Alt+P"
+    "chase": "CommandOrControl+Alt+C",
+    "pause": "CommandOrControl+Alt+P",
+    "pauseFallback": "CommandOrControl+Shift+Alt+P"
   },
   "freeRoam": {
     "speedMin": 34,
     "speedMax": 72,
     "turnIntervalMs": 3200
   },
+  "motion": {
+    "maxSpeed": 115,
+    "maxAcceleration": 180,
+    "arrivalTolerance": 1,
+    "trailSampleDistance": 3
+  },
   "randomDad": {
-    "enabled": true,
+    "enabled": false,
     "minDelayMs": 9000,
     "maxDelayMs": 22000
   },
   "groupShout": {
-    "gatherSpeed": 180,
+    "enabled": false,
+    "gatherSpeed": 110,
     "kneelDelayMs": 350,
     "frameDurationMs": 1400
   },
   "centipede": {
-    "enabled": true,
-    "maxSpeed": 760,
-    "followStrength": 7.5,
+    "enabled": false,
+    "maxSpeed": 115,
+    "maxAcceleration": 180,
+    "followStrength": 2.4,
     "gap": 7,
     "poopCursor": true,
     "flies": true,
@@ -40,8 +50,9 @@
     "enabled": false,
     "leaderId": "person-1",
     "followerIds": [],
-    "maxSpeed": 300,
-    "followStrength": 3,
+    "maxSpeed": 105,
+    "maxAcceleration": 170,
+    "followStrength": 2.2,
     "deadZone": 32,
     "gap": 7,
     "dropDistance": 88,
@@ -55,7 +66,10 @@
     "roundResetDelayMs": 600,
     "maxDroppings": 1,
     "droppingTtlMs": 20000,
-    "poopSize": 36,
+    "relaySpeed": 135,
+    "cursorPoopMaxSpeed": 145,
+    "mouthHoldMs": 520,
+    "poopSize": 48,
     "stinkSize": 28
   },
   "prankEffects": {

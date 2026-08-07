@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { applyCodexRuntimeArgs, ensureElectronRuntime, fail, parseArgs, readJson } from './lib/common.mjs';
 import { portableRelative } from './lib/privacy.mjs';
+import { scenarioDurationMs } from './lib/scenario-timing.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 applyCodexRuntimeArgs(args);
@@ -20,6 +21,18 @@ const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const outputRoot = path.dirname(project);
 const preview = path.join(outputRoot, 'preview');
 const runtime = path.join(preview, 'runtime-window.png');
+const runtimeSecond = path.join(preview, 'runtime-window-2.png');
+const runtimePaused = path.join(preview, 'runtime-paused.png');
+const runtimeSmokeTechnical = path.join(preview, 'runtime-smoke-technical.png');
+const runtimeEvidenceManifest = path.join(preview, 'runtime-evidence-manifest.json');
+const runtimeSmokeError = path.join(preview, 'runtime-smoke-error.txt');
+const obsoleteRuntimeEvidenceNames = [
+  'normal-desktop-composite.png',
+  'normal-desktop-composite-v2.png',
+  'normal-desktop-composite-v3.png',
+  'runtime-window-bottom-2x.png',
+  'windows-packaged-smoke.png'
+];
 const config = readJson(path.join(project, 'src', 'config', 'pet.config.json'));
 const behaviors = readJson(path.join(project, 'src', 'config', 'behaviors.json'));
 const productName = config.app?.name || 'Love Roommate';
@@ -31,6 +44,13 @@ function verifyScenarioReport(scenario, reportPath) {
   const report = readJson(reportPath);
   const samples = Array.isArray(report.samples) ? report.samples : [];
   if (samples.length < 10) fail(`${scenario} scenario produced too few samples.`);
+  const captures = Array.isArray(report.captures) ? report.captures : [];
+  if (!report.skippedReason) {
+    if (!captures.length) fail(`${scenario} scenario is missing release evidence captures.`);
+    if (captures.some((capture) => capture.captureKind !== 'desktop-compositor' || capture.releaseEligible !== true)) {
+      fail(`${scenario} scenario release evidence must come from the desktop compositor and be explicitly release eligible.`);
+    }
+  }
   for (const sample of samples) {
     for (const pet of sample.pets || []) {
       if (![pet.x, pet.y, pet.vx, pet.vy, pet.frame].every(Number.isFinite)) fail(`${scenario} produced non-finite pet state.`);
@@ -45,6 +65,30 @@ function verifyScenarioReport(scenario, reportPath) {
     const excludedSet = new Set(excludedIds);
     const characterIds = config.characters.map((character) => character.id);
     const characterSet = new Set(characterIds);
+    const selectedSelfId = typeof config.selection?.userCharacterId === 'string' && config.selection.userCharacterId
+      ? config.selection.userCharacterId
+      : null;
+    const expectedParticipantIds = selectedSelfId
+      ? characterIds.filter((id) => id !== selectedSelfId)
+      : characterIds;
+    const expectedExcludedIds = selectedSelfId ? [selectedSelfId] : [];
+    const singletonSelf = Boolean(selectedSelfId) && characterIds.length === 1;
+    if (report.skippedReason === 'no-eligible-participants' && !singletonSelf) {
+      fail(`${scenario} no-eligible-participants is allowed only for a single selected-self character.`);
+    }
+    if (recipientId !== selectedSelfId) {
+      fail(selectedSelfId
+        ? `${scenario} recipient must be the selected self.`
+        : `${scenario} project without self must report a null recipient.`);
+    }
+    if (JSON.stringify(excludedIds) !== JSON.stringify(expectedExcludedIds)) {
+      fail(selectedSelfId
+        ? `${scenario} excluded ids must contain only the selected self.`
+        : `${scenario} project without self must report null recipient and no excluded ids.`);
+    }
+    if (JSON.stringify(participantIds) !== JSON.stringify(expectedParticipantIds)) {
+      fail(`${scenario} participants must contain every character except the selected self, in configured order.`);
+    }
     if (participantSet.size !== participantIds.length || excludedSet.size !== excludedIds.length) {
       fail(`${scenario} reported duplicate participant or excluded ids.`);
     }
@@ -61,6 +105,7 @@ function verifyScenarioReport(scenario, reportPath) {
     const excludedPets = (sample) => (sample.pets || []).filter((pet) => excludedSet.has(pet.id));
     const recipientPet = (sample) => recipientId ? (sample.pets || []).find((pet) => pet.id === recipientId) || null : null;
     const spectatorExcluded = (sample) => excludedPets(sample).filter((pet) => pet.id !== recipientId);
+    const groupEventSamples = samples.filter((sample) => ['forming', 'kneeling', 'shouting'].includes(sample.phase));
     if (samples.some((sample) => participantPets(sample).length !== participantSet.size || excludedPets(sample).length !== excludedSet.size)) {
       fail(`${scenario} samples do not contain the reported participant and excluded characters.`);
     }
@@ -68,8 +113,8 @@ function verifyScenarioReport(scenario, reportPath) {
     if (samples.some((sample) => excludedPets(sample).some((pet) => pet.action === 'shout' || pet.phrase === report.expectedPhrase))) {
       fail(`${scenario} made an excluded character kneel or shout.`);
     }
-    const firstExcluded = new Map(spectatorExcluded(samples[0]).map((pet) => [pet.id, pet]));
-    if (samples.some((sample) => spectatorExcluded(sample).some((pet) => {
+    const firstExcluded = new Map(spectatorExcluded(groupEventSamples[0] || samples[0]).map((pet) => [pet.id, pet]));
+    if (groupEventSamples.some((sample) => spectatorExcluded(sample).some((pet) => {
       const initial = firstExcluded.get(pet.id);
       return !initial || Math.abs(pet.x - initial.x) > 0.01 || Math.abs(pet.y - initial.y) > 0.01 || pet.action !== initial.action || pet.phrase !== initial.phrase;
     }))) {
@@ -105,7 +150,7 @@ function verifyScenarioReport(scenario, reportPath) {
       const recipient = recipientPet(sample);
       if (recipient && Math.hypot(recipient.vx, recipient.vy) > gatherSpeed + 1) fail(`${scenario} recipient exceeded the configured gather speed.`);
     }
-    const eventSamples = [...formingSamples, ...kneelingSamples, ...shoutingSamples];
+    const eventSamples = groupEventSamples;
     if (recipientId && samples.some((sample) => {
       const recipient = recipientPet(sample);
       return !recipient || recipient.action === 'shout' || recipient.phrase;
@@ -126,29 +171,116 @@ function verifyScenarioReport(scenario, reportPath) {
       fail(`${scenario} used the wrong or unsynchronized phrase.`);
     }
     const completedRow = kneelingSamples[0];
-    const row = participantPets(completedRow).sort((a, b) => a.x - b.x);
-    if (JSON.stringify(row.map((pet) => pet.id)) !== JSON.stringify(report.expectedOrder || [])) {
-      fail(`${scenario} row order does not match the configured 3 -> 1 -> 2 -> 4 -> 5 sequence.`);
-    }
-    if (Math.max(...row.map((pet) => pet.y)) - Math.min(...row.map((pet) => pet.y)) > 1) fail(`${scenario} row is not horizontally aligned.`);
-    const gaps = row.slice(1).map((pet, index) => pet.x - row[index].x);
-    if (gaps.length && Math.max(...gaps) - Math.min(...gaps) > 1) fail(`${scenario} row spacing is unstable.`);
-    if (row.some((pet) => pet.action !== 'shout' || Math.floor(pet.frame) !== 0 || pet.phrase)) fail(`${scenario} completed row is not silently kneeling before the shout.`);
-    if (recipientId) {
-      const recipient = recipientPet(completedRow);
-      const size = config.render.spriteSize;
-      const recipientCenter = recipient.x + size / 2;
-      const rowCenter = (row[0].x + row.at(-1).x + size) / 2;
-      if (Math.abs(recipientCenter - rowCenter) > 1) fail(`${scenario} recipient is not on the kneeling row center axis.`);
-      if (recipient.y + size + 16 > row[0].y) fail(`${scenario} recipient overlaps the kneeling row instead of standing in front.`);
-      if (row.some((pet) => pet.direction !== (pet.x + size / 2 < recipientCenter ? 'right' : 'left'))) {
-        fail(`${scenario} participants are not facing the recipient.`);
+    const workArea = report.workArea;
+    if (!workArea || ![workArea.x, workArea.y, workArea.width, workArea.height].every(Number.isFinite)
+      || workArea.width <= 0 || workArea.height <= 0) fail(`${scenario} did not report a valid work area.`);
+    const spriteSize = config.render.spriteSize;
+    const windowSize = Number.isFinite(config.render.windowSize) && config.render.windowSize >= spriteSize
+      ? config.render.windowSize
+      : spriteSize;
+    const windowPadding = (windowSize - spriteSize) / 2;
+    const participants = participantPets(completedRow);
+    const windowRect = (pet) => ({
+      x: pet.x - windowPadding,
+      y: pet.y - windowPadding,
+      width: windowSize,
+      height: windowSize
+    });
+    const visibleRect = (pet) => ({
+      x: pet.x,
+      y: pet.y,
+      width: spriteSize,
+      height: spriteSize
+    });
+    const windowCenter = (pet) => {
+      const rect = windowRect(pet);
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    };
+    const inWorkArea = (pet) => {
+      const rect = windowRect(pet);
+      return rect.x >= workArea.x - 0.01 && rect.y >= workArea.y - 0.01
+        && rect.x + rect.width <= workArea.x + workArea.width + 0.01
+        && rect.y + rect.height <= workArea.y + workArea.height + 0.01;
+    };
+    if (participants.some((pet) => !inWorkArea(pet))) fail(`${scenario} placed a kneeling participant outside the work area.`);
+    const overlaps = (left, right) => {
+      const leftRect = visibleRect(left);
+      const rightRect = visibleRect(right);
+      return leftRect.x < rightRect.x + rightRect.width - 0.01 && leftRect.x + leftRect.width > rightRect.x + 0.01
+        && leftRect.y < rightRect.y + rightRect.height - 0.01 && leftRect.y + leftRect.height > rightRect.y + 0.01;
+    };
+    const completedPets = completedRow.pets || [];
+    for (let left = 0; left < completedPets.length; left += 1) {
+      for (let right = left + 1; right < completedPets.length; right += 1) {
+        if (overlaps(completedPets[left], completedPets[right])) fail(`${scenario} completed formation characters visibly overlap.`);
       }
     }
-    const captures = new Map((report.captures || []).map((capture) => [capture.label, capture]));
-    for (const label of ['forming-early', 'forming-late', 'kneeling', 'shout-0', 'shout-1', 'shout-2']) {
-      const capture = captures.get(label);
+    for (let left = 0; left < participants.length; left += 1) {
+      for (let right = left + 1; right < participants.length; right += 1) {
+        if (overlaps(participants[left], participants[right])) fail(`${scenario} kneeling participants overlap.`);
+      }
+    }
+    const rows = [];
+    for (const pet of [...participants].sort((left, right) => left.y - right.y || left.x - right.x)) {
+      const current = rows.at(-1);
+      if (!current || Math.abs(current[0].y - pet.y) > 1) rows.push([pet]);
+      else current.push(pet);
+    }
+    for (const row of rows) row.sort((left, right) => left.x - right.x);
+    const ordered = rows.flat();
+    if (JSON.stringify(ordered.map((pet) => pet.id)) !== JSON.stringify(report.expectedOrder || [])) {
+      fail(`${scenario} row-major order does not match the configured participant order.`);
+    }
+    for (const row of rows) {
+      if (Math.max(...row.map((pet) => pet.y)) - Math.min(...row.map((pet) => pet.y)) > 1) fail(`${scenario} row is not horizontally aligned.`);
+      const gaps = row.slice(1).map((pet, index) => pet.x - row[index].x);
+      if (gaps.length && Math.max(...gaps) - Math.min(...gaps) > 1) fail(`${scenario} row spacing is unstable.`);
+    }
+    const rowTops = rows.map((row) => row[0].y);
+    if (rowTops.slice(1).some((top, index) => top - rowTops[index] < spriteSize - 0.01)) fail(`${scenario} kneeling rows overlap vertically.`);
+    const rowGaps = rowTops.slice(1).map((top, index) => top - rowTops[index]);
+    if (rowGaps.length > 1 && Math.max(...rowGaps) - Math.min(...rowGaps) > 1) fail(`${scenario} row-to-row spacing is unstable.`);
+    const rowCenters = rows.map((row) => {
+      const first = windowRect(row[0]);
+      const last = windowRect(row.at(-1));
+      return (first.x + last.x + last.width) / 2;
+    });
+    if (Math.max(...rowCenters) - Math.min(...rowCenters) > 1) fail(`${scenario} kneeling rows do not share a center axis.`);
+    if (ordered.some((pet) => pet.action !== 'shout' || Math.floor(pet.frame) !== 0 || pet.phrase)) fail(`${scenario} completed rows are not silently kneeling before the shout.`);
+    if (recipientId) {
+      const recipient = recipientPet(completedRow);
+      if (!inWorkArea(recipient)) fail(`${scenario} placed the recipient outside the work area.`);
+      if (participants.some((pet) => overlaps(recipient, pet))) fail(`${scenario} recipient overlaps a kneeling participant.`);
+      const recipientRect = visibleRect(recipient);
+      const recipientCenter = windowCenter(recipient).x;
+      const rowCenter = rowCenters.reduce((total, center) => total + center, 0) / rowCenters.length;
+      if (Math.abs(recipientCenter - rowCenter) > 1) fail(`${scenario} recipient is not on the kneeling row center axis.`);
+      const firstRowTop = Math.min(...rows[0].map((pet) => visibleRect(pet).y));
+      if (recipientRect.y + recipientRect.height + 16 > firstRowTop) fail(`${scenario} recipient overlaps the kneeling rows instead of standing in front.`);
+      if (ordered.some((pet) => pet.direction !== (windowCenter(pet).x < recipientCenter ? 'right' : 'left'))) {
+        fail(`${scenario} participants are not facing the recipient.`);
+      }
+      for (const sample of shoutingSamples) {
+        const shoutingRecipient = recipientPet(sample);
+        const shoutingRecipientCenter = windowCenter(shoutingRecipient).x;
+        if (participantPets(sample).some((pet) => pet.direction !== (windowCenter(pet).x < shoutingRecipientCenter ? 'right' : 'left'))) {
+          fail(`${scenario} participants did not keep facing the recipient throughout shouting.`);
+        }
+      }
+    }
+    const capturesByLabel = new Map(captures.map((capture) => [capture.label, capture]));
+    const capturePhases = new Map([
+      ['forming-early', 'forming'],
+      ['forming-late', 'forming'],
+      ['kneeling', 'kneeling'],
+      ['shout-0', 'shouting'],
+      ['shout-1', 'shouting'],
+      ['shout-2', 'shouting']
+    ]);
+    for (const [label, expectedPhase] of capturePhases) {
+      const capture = capturesByLabel.get(label);
       if (!capture) fail(`${scenario} is missing the ${label} visual capture.`);
+      if (capture.phase !== expectedPhase) fail(`${scenario} capture ${label} recorded phase ${capture.phase || 'missing'} instead of ${expectedPhase}.`);
       const composition = path.join(path.dirname(reportPath), capture.composition || '');
       if (!fs.existsSync(composition)) fail(`${scenario} capture ${label} is missing its composition image.`);
     }
@@ -158,11 +290,80 @@ function verifyScenarioReport(scenario, reportPath) {
   if (leaders.length < 2 || Math.hypot(leaders.at(-1).x - leaders[0].x, leaders.at(-1).y - leaders[0].y) < 40) {
     fail(`${scenario} leader did not visibly follow the simulated cursor.`);
   }
+  const characterIds = config.characters.map((character) => character.id);
+  const requireFullComposition = (capture, description) => {
+    const composition = path.join(path.dirname(reportPath), capture?.composition || '');
+    if (!capture || !capture.composition || !fs.existsSync(composition)) fail(`${description} is missing its full composition image.`);
+    const capturedIds = new Set((capture.frames || []).map((frame) => frame.id));
+    if (characterIds.some((id) => !capturedIds.has(id))) fail(`${description} does not contain every character window.`);
+  };
+  if (scenario === 'centipede') {
+    const sequence = captures.filter((capture) => capture.evidence?.kind === 'cursor-centipede');
+    if (sequence.length < 2) fail('Centipede evidence must contain two distinct full-composition chase moments.');
+    const viewportKey = (capture) => {
+      const bounds = capture.compositionBounds;
+      if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
+        || bounds.width <= 0 || bounds.height <= 0) return null;
+      return `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
+    };
+    const fixedViewport = viewportKey(sequence[0]);
+    if (!fixedViewport || sequence.some((capture) => viewportKey(capture) !== fixedViewport)) {
+      fail('Centipede sequence composition bounds must match one fixed viewport.');
+    }
+    for (const capture of sequence) {
+      requireFullComposition(capture, `Centipede capture ${capture.label || 'unlabeled'}`);
+      if (!(capture.effects || []).some((effect) => effect.role === 'cursor-poop' && effect.visible !== false)) {
+        fail(`Centipede capture ${capture.label || 'unlabeled'} is missing the visible cursor poop.`);
+      }
+    }
+    const position = (capture) => capture.evidence?.leaderPosition;
+    const distinctMoments = sequence.some((capture, index) => sequence.slice(index + 1).some((other) => {
+      const left = position(capture);
+      const right = position(other);
+      return left && right && [left.x, left.y, right.x, right.y].every(Number.isFinite)
+        && [capture.evidence?.elapsedMs, other.evidence?.elapsedMs].every(Number.isFinite)
+        && Math.abs(other.evidence.elapsedMs - capture.evidence.elapsedMs) >= 300
+        && Math.hypot(right.x - left.x, right.y - left.y) >= 40;
+    }));
+    if (!distinctMoments) fail('Centipede evidence must show two distinct times and chase positions at least 40 pixels apart.');
+  }
   if (scenario === 'poop-chase') {
     if (samples.some((sample) => (sample.droppings || []).length !== 1)) fail('Poop relay must keep exactly one dropping in every sampled frame.');
     const sources = new Set(samples.flatMap((sample) => (sample.droppings || []).map((dropping) => dropping.sourceId)).filter(Boolean));
-    if (sources.size < 2) fail('Poop relay did not advance to a second participant during the scenario test.');
+    const expectedSource = config.selection?.userCharacterId;
+    if (!expectedSource || sources.size !== 1 || !sources.has(expectedSource)) {
+      fail('Poop chase must keep the selected self as the only persistent poop source.');
+    }
+    const expectedTargets = config.characters.map((character) => character.id).filter((id) => id !== expectedSource);
+    const targets = new Set(samples.flatMap((sample) => (sample.droppings || []).map((dropping) => dropping.targetId)).filter(Boolean));
+    if (expectedTargets.some((id) => !targets.has(id))) fail('Poop chase did not let every other character eat from the selected self.');
+    if (samples.some((sample) => (sample.droppings || []).some((dropping) => dropping.cursorControlled))) {
+      fail('Selected-self poop chase unexpectedly used the cursor-controlled poop variant.');
+    }
+    const expectedEaters = new Set(expectedTargets);
+    const eatingCaptures = captures.filter((capture) => capture.evidence?.kind === 'eating-climax');
+    const capturedEaters = new Set(eatingCaptures.map((capture) => capture.evidence?.eaterId).filter((id) => expectedEaters.has(id)));
+    if (capturedEaters.size < Math.min(2, expectedEaters.size)) fail('Poop chase evidence must show two different eaters at their eating climax.');
+    for (const capture of eatingCaptures) requireFullComposition(capture, `Poop chase eating capture ${capture.label || 'unlabeled'}`);
+    const handoffCapture = captures.find((capture) => {
+      const evidence = capture.evidence;
+      return evidence?.kind === 'handoff-return'
+        && expectedEaters.has(evidence.returningEaterId)
+        && expectedEaters.has(evidence.nextEaterId)
+        && evidence.returningEaterId !== evidence.nextEaterId;
+    });
+    if (!handoffCapture) fail('Poop chase evidence is missing a return handoff composition between different eaters.');
+    requireFullComposition(handoffCapture, 'Poop chase return handoff capture');
   }
+}
+
+if (args['verify-scenario-report']) {
+  if (typeof args.scenario !== 'string' || typeof args.report !== 'string') {
+    fail('Usage: node build_project.mjs --project <project> --verify-scenario-report --scenario <name> --report <report.json>');
+  }
+  verifyScenarioReport(args.scenario, path.resolve(args.report));
+  console.log(JSON.stringify({ scenario: args.scenario, report: 'verified' }));
+  process.exit(0);
 }
 
 function runNode(script, scriptArgs, cwd = project, extraEnv = {}) {
@@ -189,10 +390,8 @@ const validateScript = path.join(skillRoot, 'scripts', 'validate_project.mjs');
 const selfCheckScript = path.join(skillRoot, 'scripts', 'self_check_project.mjs');
 const privacyScript = path.join(skillRoot, 'scripts', 'audit_output_privacy.mjs');
 const performanceScript = path.join(skillRoot, 'scripts', 'validate_performance_report.mjs');
+const performanceReleaseScript = path.join(skillRoot, 'scripts', 'validate_performance_release.mjs');
 const windowsPerformanceReport = path.join(preview, 'performance', 'windows-performance-report.json');
-const performanceArtifact = path.join(project, 'dist', 'windows', safeName);
-const performanceExecutable = path.join(performanceArtifact, `${safeName}.exe`);
-const performancePackagedRoot = path.join(performanceArtifact, 'resources', 'app');
 const sourceArgs = typeof args.source === 'string' ? ['--source', path.resolve(args.source)] : [];
 if (!runNode(validateScript, ['--project', project, ...sourceArgs, ...nodeArgs])) fail('Project validation failed.');
 if (!runNode(selfCheckScript, ['--project', project, '--preview', preview, '--warn-only', ...nodeArgs])) {
@@ -212,6 +411,30 @@ fs.cpSync(project, stage, {
 
 const electronRuntime = ensureElectronRuntime(stage);
 const electronExecutable = electronRuntime.executable;
+const stagedDist = path.join(stage, 'dist');
+const stagedPackagedArtifact = path.join(stagedDist, 'windows', safeName);
+let stagedCandidatePackaged = false;
+
+function packageStagedCandidate() {
+  if (stagedCandidatePackaged) return;
+  if (!runNode(path.join(stage, 'tools', 'package-current.mjs'), [], stage, { PET_ELECTRON_DIST: electronRuntime.dist })) {
+    fail('Current-platform packaging failed.');
+  }
+  stagedCandidatePackaged = true;
+}
+
+function validatePerformanceCandidate(artifact) {
+  const executable = path.join(artifact, `${safeName}.exe`);
+  const packagedRoot = path.join(artifact, 'resources', 'app');
+  if (!runNode(performanceScript, [
+    '--project', project,
+    '--report', windowsPerformanceReport,
+    '--executable', executable,
+    '--packaged-root', packagedRoot
+  ])) {
+    fail('Performance report validation failed. Run the packaged Windows performance audit and keep a fresh passing preview/performance/windows-performance-report.json.');
+  }
+}
 if (!runNode('--test', [
   'tests/behavior-engine.test.mjs',
   'tests/performance-v2.test.mjs',
@@ -223,16 +446,34 @@ if (!runNode('--test', [
 ], stage)) fail('Generated project tests failed.');
 fs.mkdirSync(preview, { recursive: true });
 
-if (!args['skip-smoke'] && (!fs.existsSync(runtime) || args['refresh-smoke'])) {
-  runElectron(electronExecutable, stage, { PET_SMOKE_TEST: '1', PET_SMOKE_OUT: runtime });
+const runtimeEvidenceFiles = [runtime, runtimeSecond, runtimePaused, runtimeSmokeTechnical, runtimeEvidenceManifest];
+if (args['refresh-smoke']) {
+  for (const name of obsoleteRuntimeEvidenceNames) {
+    const obsoletePath = path.join(preview, name);
+    fs.rmSync(obsoletePath, { force: true });
+  }
 }
-if (!fs.existsSync(runtime)) fail('Runtime screenshot is missing. Run without --skip-smoke.');
+if (!args['skip-smoke'] && (runtimeEvidenceFiles.some((file) => !fs.existsSync(file)) || args['refresh-smoke'])) {
+  for (const file of [...runtimeEvidenceFiles, runtimeSmokeError]) {
+    fs.rmSync(file, { force: true });
+  }
+  runElectron(electronExecutable, stage, {
+    PET_SMOKE_TEST: '1',
+    PET_RUNTIME_OUT: runtime,
+    PET_RUNTIME_OUT_2: runtimeSecond,
+    PET_RUNTIME_PAUSED_OUT: runtimePaused,
+    PET_SMOKE_OUT: runtimeSmokeTechnical,
+    PET_RUNTIME_EVIDENCE_MANIFEST: runtimeEvidenceManifest
+  });
+}
+if (fs.existsSync(runtimeSmokeError)) fail(`Runtime evidence capture failed: ${fs.readFileSync(runtimeSmokeError, 'utf8').trim()}`);
+if (runtimeEvidenceFiles.some((file) => !fs.existsSync(file))) fail('Runtime product or technical evidence is missing. Run without --skip-smoke.');
 
 if (!args['skip-scenarios']) {
   const scenarios = [];
   if (behaviors.centipede?.enabled) scenarios.push('centipede');
   if (behaviors.poopChase?.enabled) scenarios.push('poop-chase');
-  scenarios.push('dad-shout', 'grandpa-shout');
+  if (behaviors.groupShout?.enabled) scenarios.push('dad-shout', 'grandpa-shout');
   for (const scenario of scenarios) {
     const scenarioDir = path.join(preview, 'scenarios', scenario);
     const reportPath = path.join(scenarioDir, 'report.json');
@@ -244,7 +485,7 @@ if (!args['skip-scenarios']) {
         PET_SCENARIO_TEST: scenario,
         PET_SCENARIO_OUT: reportPath,
         PET_SCENARIO_CAPTURE_DIR: scenarioDir,
-        PET_SCENARIO_DURATION_MS: scenario.endsWith('-shout') ? '12000' : '6000'
+        PET_SCENARIO_DURATION_MS: String(scenarioDurationMs(scenario, config, behaviors))
       });
     }
     verifyScenarioReport(scenario, reportPath);
@@ -257,13 +498,26 @@ if (!runNode(selfCheckScript, ['--project', project, '--preview', preview, '--ru
 if (!runNode(privacyScript, ['--root', outputRoot, ...sourceArgs])) {
   fail('Output privacy audit failed. Remove host paths, unlisted raster files, or copied source photos before packaging.');
 }
-if (process.platform === 'win32' && !runNode(performanceScript, [
-  '--project', project,
-  '--report', windowsPerformanceReport,
-  '--executable', performanceExecutable,
-  '--packaged-root', performancePackagedRoot
-])) {
-  fail('Performance report validation failed. Run the packaged Windows performance audit and keep a fresh passing preview/performance/windows-performance-report.json.');
+if (process.platform === 'win32') {
+  packageStagedCandidate();
+  validatePerformanceCandidate(stagedPackagedArtifact);
+}
+if (process.platform === 'win32' && args['release-performance-gate']) {
+  if (config.characters.length !== 8) fail('The release performance gate must run from the final eight-window candidate project.');
+  const fiveArgs = ['five-performance-project', 'five-performance-report', 'five-performance-executable', 'five-performance-packaged-root'];
+  if (fiveArgs.some((name) => typeof args[name] !== 'string' || !args[name])) {
+    fail('The release performance gate requires the five-window project, report, executable, and packaged root.');
+  }
+  if (!runNode(performanceReleaseScript, [
+    '--five-project', path.resolve(args['five-performance-project']),
+    '--five-report', path.resolve(args['five-performance-report']),
+    '--five-executable', path.resolve(args['five-performance-executable']),
+    '--five-packaged-root', path.resolve(args['five-performance-packaged-root']),
+    '--eight-project', project,
+    '--eight-report', windowsPerformanceReport,
+    '--eight-executable', path.join(stagedPackagedArtifact, `${safeName}.exe`),
+    '--eight-packaged-root', path.join(stagedPackagedArtifact, 'resources', 'app')
+  ])) fail('The combined five-window plus eight-window packaged performance release gate failed.');
 }
 
 if (args['verify-only']) {
@@ -272,10 +526,8 @@ if (args['verify-only']) {
   process.exit(0);
 }
 
-if (!runNode(path.join(stage, 'tools', 'package-current.mjs'), [], stage, { PET_ELECTRON_DIST: electronRuntime.dist })) {
-  fail('Current-platform packaging failed.');
-}
-const dist = path.join(stage, 'dist');
+packageStagedCandidate();
+const dist = stagedDist;
 const platformFolder = process.platform === 'win32' ? 'windows' : 'macos';
 const release = path.join(outputRoot, 'release', platformFolder);
 fs.mkdirSync(release, { recursive: true });
@@ -329,12 +581,23 @@ const packagedExecutable = process.platform === 'win32'
   ? path.join(packagedArtifact, `${safeName}.exe`)
   : path.join(packagedArtifact, 'Contents', 'MacOS', safeName);
 if (!fs.existsSync(packagedExecutable)) fail(`Packaged executable is missing: ${portableRelative(outputRoot, packagedExecutable)}`);
+if (process.platform === 'win32') validatePerformanceCandidate(packagedArtifact);
 const packagedSmoke = path.join(preview, `${platformFolder}-packaged-smoke.png`);
+const packagedSmokeSecond = path.join(preview, `${platformFolder}-packaged-smoke-2.png`);
+const packagedPaused = path.join(preview, `${platformFolder}-packaged-paused.png`);
+const packagedSmokeTechnical = path.join(preview, `${platformFolder}-packaged-smoke-technical.png`);
+const packagedEvidenceManifest = path.join(preview, `${platformFolder}-packaged-evidence-manifest.json`);
 runElectron(packagedExecutable, packagedArtifact, {
   PET_SMOKE_TEST: '1',
-  PET_SMOKE_OUT: packagedSmoke
+  PET_RUNTIME_OUT: packagedSmoke,
+  PET_RUNTIME_OUT_2: packagedSmokeSecond,
+  PET_RUNTIME_PAUSED_OUT: packagedPaused,
+  PET_SMOKE_OUT: packagedSmokeTechnical,
+  PET_RUNTIME_EVIDENCE_MANIFEST: packagedEvidenceManifest
 });
-if (!fs.existsSync(packagedSmoke)) fail(`Packaged smoke screenshot is missing: ${portableRelative(outputRoot, packagedSmoke)}`);
+const packagedEvidenceFiles = [packagedSmoke, packagedSmokeSecond, packagedPaused, packagedSmokeTechnical, packagedEvidenceManifest];
+if (packagedEvidenceFiles.some((file) => !fs.existsSync(file))) fail(`Packaged runtime evidence is incomplete under: ${portableRelative(outputRoot, preview)}`);
+if (process.platform === 'win32') validatePerformanceCandidate(packagedArtifact);
 if (!runNode(privacyScript, ['--root', outputRoot, ...sourceArgs])) {
   fail('Post-package privacy audit failed. Remove host paths, unlisted raster files, copied source photos, or unsanitized error logs.');
 }
@@ -346,5 +609,6 @@ console.log(JSON.stringify({
   release: portableRelative(outputRoot, release),
   artifacts: copied.map((artifact) => portableRelative(outputRoot, artifact)),
   packagedSmoke: portableRelative(outputRoot, packagedSmoke),
+  packagedSmokeTechnical: portableRelative(outputRoot, packagedSmokeTechnical),
   platform: `${process.platform}/${process.arch}`
 }, null, 2));

@@ -204,6 +204,29 @@ function electronRuntimeLayout(runtimeRoot) {
   };
 }
 
+export function repairMissingMacFrameworkSymlinks(runtimeRoot) {
+  if (process.platform !== 'darwin') return;
+  const layout = electronRuntimeLayout(runtimeRoot);
+  const frameworkRoot = path.join(
+    layout.dist,
+    'Electron.app', 'Contents', 'Frameworks', 'Electron Framework.framework'
+  );
+  for (const [link, expected] of layout.relativeLinks) {
+    let existing = null;
+    try {
+      existing = fs.lstatSync(link);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    if (existing?.isSymbolicLink()) continue;
+    const target = path.resolve(path.dirname(link), expected);
+    const relativeTarget = path.relative(frameworkRoot, target);
+    if (relativeTarget.startsWith('..') || path.isAbsolute(relativeTarget) || !fs.existsSync(target)) continue;
+    if (existing) fs.rmSync(link, { recursive: existing.isDirectory(), force: false });
+    fs.symlinkSync(expected, link);
+  }
+}
+
 function electronRuntimeProblems(runtimeRoot) {
   const layout = electronRuntimeLayout(runtimeRoot);
   const problems = layout.requiredFiles
@@ -291,6 +314,11 @@ export function ensureElectronRuntime(project) {
   let partial;
   try {
     partial = installPinnedRuntime('electron', runtimeRoot);
+    verifyInstalledElectronArchive(partial);
+    // pnpm's Electron postinstall may preserve the verified framework payload
+    // but dereference the archive's three relative links. After the official
+    // archive checksum is verified, recreate only those fixed in-bundle links.
+    repairMissingMacFrameworkSymlinks(partial);
     const partialStatus = electronRuntimeProblems(partial);
     if (partialStatus.problems.length) throw new Error(`Installed Electron runtime is incomplete:\n- ${partialStatus.problems.join('\n- ')}`);
     verifyInstalledElectronArchive(partial);
