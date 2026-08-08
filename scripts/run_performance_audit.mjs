@@ -6,6 +6,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from './lib/common.mjs';
+import { packagedArtifactFingerprint, validateWindowsPortableArtifact } from './lib/packaged-artifact.mjs';
+import { sanitizePersistedValue } from './lib/privacy.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.project || !args.executable) {
@@ -19,7 +21,8 @@ const require = createRequire(import.meta.url);
 const trustedAudit = require(path.join(skillRoot, 'assets', 'electron-template', 'src', 'performance-audit.js'));
 const project = path.resolve(args.project);
 const executable = path.resolve(args.executable);
-const packagedRoot = path.join(path.dirname(executable), 'resources', 'app');
+const portableArtifact = validateWindowsPortableArtifact(executable);
+const packagedRoot = portableArtifact.packagedRoot;
 const outputRoot = path.dirname(project);
 const report = path.resolve(args.report || path.join(outputRoot, 'preview', 'performance', 'windows-performance-report.json'));
 const validator = path.join(scriptRoot, 'validate_performance_report.mjs');
@@ -36,11 +39,10 @@ const projectFingerprint = trustedAudit.runtimeFingerprintForProject(project);
 const packagedFingerprint = trustedAudit.runtimeFingerprintForProject(packagedRoot);
 if (projectFingerprint !== packagedFingerprint) throw new Error('Project and packaged runtime fingerprints do not match.');
 const executableSha256 = crypto.createHash('sha256').update(fs.readFileSync(executable)).digest('hex');
+const artifactFingerprintSha256 = packagedArtifactFingerprint(portableArtifact.artifactRoot);
 
 function publicMessage(error) {
-  return String(error?.message || error || 'unknown error')
-    .replace(/(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s"'`<>]*/g, '[redacted-path]')
-    .replace(/\\\\[^\s"'`<>]+/g, '[redacted-path]');
+  return sanitizePersistedValue(String(error?.message || error || 'unknown error'), outputRoot);
 }
 
 function writeJson(value) {
@@ -90,7 +92,8 @@ const child = spawn(executable, [`--user-data-dir=${userData}`], {
     PET_PERFORMANCE_TEST: '1',
     PET_PERFORMANCE_OUT: report,
     PET_PERFORMANCE_LAUNCHED_AT_MS: String(launchedAtEpochMs),
-    PET_PERFORMANCE_EXECUTABLE_SHA256: executableSha256
+    PET_PERFORMANCE_EXECUTABLE_SHA256: executableSha256,
+    PET_PERFORMANCE_ARTIFACT_FINGERPRINT_SHA256: artifactFingerprintSha256
   },
   shell: false,
   stdio: 'ignore',
@@ -127,9 +130,12 @@ if (finalParsed) {
   else terminalReport = finalParsed;
 }
 
+const completedAtEpochMs = Date.now();
 const runner = {
   outerTimeoutMs,
-  elapsedMs: Date.now() - launchedAtEpochMs,
+  launchedAt: new Date(launchedAtEpochMs).toISOString(),
+  completedAt: new Date(completedAtEpochMs).toISOString(),
+  elapsedMs: completedAtEpochMs - launchedAtEpochMs,
   executableExitCode: exitCode,
   exitSignal,
   timedOut,
@@ -157,7 +163,8 @@ if (runnerFailed) {
 terminalReport.runner = runner;
 terminalReport.runtime = {
   ...terminalReport.runtime,
-  executableSha256
+  executableSha256,
+  artifactFingerprintSha256
 };
 writeJson(terminalReport);
 fs.rmSync(userData, { recursive: true, force: true });

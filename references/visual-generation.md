@@ -1,58 +1,73 @@
-# Visual generation V3
+# 视觉生成规范 V3
 
-## Non-negotiable style
+## 不可妥协的风格
 
-Use the authorized source photo as the identity reference. Final people must be photorealistic and recognizably the same subjects: preserve face shape, facial features, approximate age, hairstyle, skin tone, body build, clothing colors, glasses, and accessories. Do not use chibi proportions, cartoon faces, beautification, age reduction, costume replacement, or photographic-head compositing.
+必须使用已获授权的源照片作为身份参考。最终人物必须写实且能明确认出是同一人：保留脸型、五官、约略年龄、发型、肤色、体型、服装颜色、眼镜和配饰。禁止使用 Q 版比例、卡通脸、美化、减龄、换装或摄影头部拼接。
 
-All selected master and action artwork must use Codex image generation under the declared GPT Image 2 workflow policy.
+所有最终采用的母版和动作图都必须通过 Codex 图像生成完成，并具有可验证的工作流来源证明。默认使用声明的 GPT Image 2 工作流；只有键色与本地蒙版均失败且用户显式授权时，才允许使用固定的 `gpt-image-1.5` 真透明 fallback。
 
-## Identity-master gate
+## 内置生成结果恢复
 
-Create one independent full-body identity master per person before any action artwork.
+- `$CODEX_HOME/generated_images` 可能仍是旧缓存（stale cache），不能仅凭目录里出现了一张 PNG 就把它登记为本次生成结果。
+- 当前缓存没有刷新时，从当前任务的 session JSONL 中定位本次 `image_generation_call.id`，读取同一事件的完整 `result` base64；不得读取另一次调用、旧任务或相邻人物的结果。
+- 解码后必须在落盘前后验证 PNG 签名、图片尺寸和 SHA-256；不同人物或不同资产的 SHA-256 必须唯一，重复哈希按误取缓存或重复素材失败关闭。
+- 不得仅因为缓存或自动落盘没有刷新就切换 CLI 或 `gpt-image-1.5`。原生事件仍存在时，应优先恢复该事件的结果；CLI 真透明路径只保留给本文规定的显式授权 fallback。
+- `generation-manifest.json` 只能登记已验证的真实事件和文件哈希，不得根据预期模型、文件名或提示词伪造 manifest。
 
-- One person only, neutral standing pose, full body visible, fixed camera height and scale.
-- Use the source photo directly as identity reference; never derive a new master from an old generated action sheet.
-- Prefer a flat removable key that does not occur in the person. Keep generous padding and no shadows, props, text, scenery, or neighboring people.
-- Build an original-photo / master comparison board and complete the 100-point identity review.
-- Require total score >= 90 and identity similarity >= 31/35 with no blocker before action generation.
+## 身份母版门禁
 
-## Per-action generation
+生成任何动作前，先为每个人建立一张独立的全身身份母版。
 
-Do not generate a 4x3 or other large multi-action sheet. Generate each action, or at most a mirrored left/right pair, using the approved identity master plus the original photo as references.
+- 画面只能有一个人，保持中性站姿、全身可见，并固定相机高度和人物比例。
+- 直接使用源照片作为身份参考；禁止从旧动作图或旧动作表反推新母版。
+- 优先选择人物本身没有的纯色键色背景。四周保留足够留白，不得出现阴影、道具、文字、场景或其他人物。
+- 制作“源照片 / 母版”对照板并完成 100 分身份审核。
+- 总分必须不低于 90，身份相似度必须不低于 31/35，且不存在阻断项，才能开始动作生成。
 
-Required actions:
+## 逐动作生成
 
-- crawl right A/B and crawl left A/B
-- idle right/left
-- centipede right/left
-- kneel shout 1/2/3
-- dragged/limp
-- poop right/left
-- eat right/left
+禁止一次生成 4×3 或其他大型多动作表。每次只生成一个动作；最多允许把可验证的左右镜像作为一对处理。生成时必须同时引用已批准身份母版和源照片。
 
-Every participant receives both poop and eat actions. Kneel-shout frames keep the same kneeling body pose and vary only the mouth/arms. Centipede frames must expose a readable mouth point and rear point for physical mouth-to-rear connection.
+每个人必须具备以下动作：
 
-Each accepted action record must contain the approved master fingerprint, prompt version, action name, generation version, and optional superseded-file/rejection reason.
+- 向右爬 A/B、向左爬 A/B
+- 向右待机、向左待机
+- 向右蜈蚣、向左蜈蚣
+- 跪喊 1/2/3
+- 被拖拽/瘫软
+- 向右拉屎、向左拉屎
+- 向右吃、向左吃
 
-## Transparency
+每个参与者都要有拉屎和吃的左右动作。三张跪喊帧必须保持同一跪姿，只允许嘴部和手臂形成可读相位变化。蜈蚣帧必须能明确识别嘴部锚点和身体后端锚点，以便实现嘴对前一人的后端连接。
 
-The released sprite must be a clean transparent PNG. A white or chroma-key background is only an intermediate production aid and must never remain visible in the desktop pet.
+每条通过的动作记录必须包含：已批准母版指纹、提示词版本、动作名、生成版本，以及可选的被替代文件和拒绝原因。
 
-- White is allowed when it stays clearly separated from hair, skin, clothing, shoes, and highlights. Do not use naive white removal when the subject contains white or pale-gray areas.
-- Otherwise choose one flat removable key that does not occur in the person. The key color is not part of the visual design.
-- For photorealistic people, prefer hard background removal (`border` auto-key, tolerance 24, edge contraction 1) followed by portrait-edge cleanup. Do not apply global strong despill or soft-matte color replacement to faces, skin, hair, or clothing.
-- Fully transparent pixels must have RGB `0,0,0`; hidden magenta/green/white RGB is a failure because resizing can reveal a colored halo.
-- Reject any visible purple, green, gray, or white fringe, semi-transparent rectangle, opaque corner, background gradient, damaged skin tone, or transparent holes in faces and hands.
+## 透明背景与有限恢复
 
-## Quality gate
+发布精灵必须是干净的透明 PNG。白底或键色底只能作为生产中间态，绝不能在桌宠中可见。
 
-Review source photo -> identity master -> every action side by side. Fail on:
+- 只有当白色与头发、皮肤、服装、鞋和高光明确分离时才允许使用白底；人物含白色或浅灰区域时禁止粗暴去白。
+- 否则从已审核的高饱和键色中选择人物没有的纯色。键色不是视觉设计的一部分。
+- 选择键色时，对主体代表色与固定候选色计算 sRGB→Lab 距离，按“与主体最近颜色的距离”从大到小排序。同一身份最多生成三次，键色不得重复，也不得出现第 4 次自动生成。
+- 写实人物优先使用硬边界去背（`border` 自动取键色、容差 24、边缘收缩 1），随后执行人物边缘清理。禁止对脸、皮肤、头发或衣物做全局强力去溢色或软蒙版换色。
+- 自动候选通过后立即停止重试；三次都失败时进入本地蒙版修正，不得无限调参或无限重新生成。
+- 本地修正只能改变 alpha 蒙版。若颜色已经烘焙进真实头发、皮肤或服装内部，必须判失败并更换照片或重新生成；不得把修正工具宣传成万能去色。
+- 键色与本地蒙版均失败后，真透明 fallback 仍必须失败关闭：先获得用户显式授权，确认本机已设置 `OPENAI_API_KEY`，再通过系统 `imagegen` CLI 固定使用 `gpt-image-1.5` 生成原生透明 PNG。不得静默切换模型，不得开放任意 `--model`，也不得记录或回显 API Key。
+- 真透明产物必须使用 `record_image_generation.mjs --authorized-native-transparency-fallback` 登记。该标志只证明用户授权的固定 fallback，不接受参数值，不能与键色修正元数据混用；登记后仍要核验 manifest、处理精灵并运行 self-check。
+- 全透明像素的 RGB 必须是 `0,0,0`；隐藏的洋红、绿色或白色 RGB 会在缩放时形成色边，属于失败。
+- 任何可见紫边、绿边、灰白边、半透明矩形、不透明角、背景渐变、肤色破坏，或脸和手上的透明孔洞，都必须拒绝。
 
-- face or age drift, beautification, body-build changes, clothing/accessory changes;
-- cross-person identity migration;
-- chibi/cartoon rendering or inconsistent realism;
-- missing/fused/clipped body parts;
-- action scale or camera changes;
-- chroma fringe or dirty transparency.
+## 质量门禁
 
-Do not lower thresholds to release an asset. Regenerate only the failed person/action from the approved master.
+把“源照片 → 身份母版 → 每个动作”并排检查。出现以下任一情况即失败：
+
+- 脸或年龄漂移、美化、体型变化、服装或配饰变化；
+- 不同人物之间发生身份特征迁移；
+- Q 版、卡通化或写实程度不一致；
+- 身体部位缺失、融合、重复或裁切；
+- 动作比例或相机位置变化；
+- 键色色边或脏透明区域；
+- 真透明 fallback 缺少显式授权、固定模型来源证明、封闭登记标志或 manifest/self-check 验证；
+- 修正报告丢失、被篡改，或报告中的四个文件哈希与当前文件不一致。
+
+不得降低阈值来放行素材。只重新生成失败的人物或动作，并始终从已批准母版继续。

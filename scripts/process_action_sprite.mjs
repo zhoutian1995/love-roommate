@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { applyCodexRuntimeArgs, fail, loadSharp, parseArgs, readJson, writeJson } from './lib/common.mjs';
 import { alphaBounds, inferBorderKey, nearestVisibleAlphaDistance, parseHexColor, preparePortraitAlpha } from './lib/sprite-processing.mjs';
+import { isNativeTransparencyFallback, isSupportedGeneratedAttestation } from './lib/generation-attestation.mjs';
 import { portableRelative } from './lib/privacy.mjs';
+import { validateCorrectionLineage } from './lib/transparency-retry.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.project || !args.file || !args.character || !args.action) {
@@ -28,10 +30,11 @@ const relative = portableRelative(outputRoot, file, 'Generated action image');
 if (!relative.startsWith('preview/')) fail('Generated action image must remain inside preview/.');
 
 let derivedRecord = null;
+let generationRecord = null;
 const generationManifestPath = path.join(outputRoot, 'preview', 'generation-manifest.json');
 if (fs.existsSync(generationManifestPath)) {
   const generationManifest = readJson(generationManifestPath);
-  const generationRecord = generationManifest.schemaVersion === 3 && Array.isArray(generationManifest.assets)
+  generationRecord = generationManifest.schemaVersion === 3 && Array.isArray(generationManifest.assets)
     ? generationManifest.assets.find((item) => item.kind === 'action' && item.characterId === characterId && item.action === action)
     : null;
   if (generationRecord?.origin === 'derived') {
@@ -53,7 +56,39 @@ sharp.cache(false);
 const spriteSize = Number.parseInt(args.size || config.render.spriteSize || manifest.spriteSize, 10);
 const input = await sharp(file).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
 const key = !args.key || args.key === 'auto' ? inferBorderKey(input.data, input.info.width, input.info.height, 4) : parseHexColor(args.key);
-const cleaned = preparePortraitAlpha(input.data, input.info.width, input.info.height, key, Number(args.threshold || 28), Number(args.opaque || 105));
+if (generationRecord && (generationRecord.origin || 'generated') === 'generated' && !isSupportedGeneratedAttestation(generationRecord)) {
+  fail(`Generated action attestation is invalid or unsupported for ${action}.`);
+}
+const trustedCorrected = Boolean(generationRecord?.transparencyRecovery?.correctionReport);
+const trustedNativeAlpha = isNativeTransparencyFallback(generationRecord);
+if (trustedNativeAlpha) {
+  if (!isSupportedGeneratedAttestation(generationRecord)) {
+    fail(`Native transparency attestation is invalid for ${action}.`);
+  }
+  const fileSha = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  if (generationRecord.file !== relative || generationRecord.sha256 !== fileSha) {
+    fail(`Native transparency processing does not match its schema v3 generation record: ${action}.`);
+  }
+}
+if (trustedCorrected) {
+  const correctionErrors = validateCorrectionLineage(outputRoot, generationRecord);
+  if (correctionErrors.length) {
+    fail(`Corrected action lineage is invalid for ${action}: ${correctionErrors.join(' ')}`);
+  }
+  const fileSha = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  if (generationRecord.file !== relative || generationRecord.sha256 !== fileSha) {
+    fail(`Corrected action processing does not match its schema v3 generation record: ${action}.`);
+  }
+}
+const cleaned = preparePortraitAlpha(
+  input.data,
+  input.info.width,
+  input.info.height,
+  key,
+  Number(args.threshold || 28),
+  Number(args.opaque || 105),
+  { trustedCorrected: trustedCorrected || trustedNativeAlpha }
+);
 const bounds = alphaBounds(cleaned, input.info.width, input.info.height);
 if (!bounds || bounds.coverage < 0.03 || bounds.coverage > 0.9) fail(`${action} has invalid visible coverage.`);
 const cropped = await sharp(cleaned, { raw: { width: input.info.width, height: input.info.height, channels: 4 } })
@@ -136,6 +171,7 @@ writeJson(manifestPath, manifest);
 writeJson(path.join(outputDir, `${action}-processing-report.json`), {
   characterId, action, source: relative, spriteSize,
   key: `#${key.map((part) => part.toString(16).padStart(2, '0')).join('')}`,
+  transparencyMode: trustedNativeAlpha ? 'trusted-native-alpha' : (trustedCorrected ? 'trusted-corrected-alpha' : 'chroma-key'),
   coverage: bounds.coverage,
   ...(derivedRecord ? { derivedFrom: { action: derivedRecord.sourceAction, transform: 'horizontal-flip' } } : {}),
   anchors: action.startsWith('centipede_') ? {

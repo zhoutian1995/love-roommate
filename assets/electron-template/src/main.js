@@ -8,10 +8,12 @@ const zlib = require('node:zlib');
 const {
   app,
   BrowserWindow,
+  desktopCapturer,
   globalShortcut,
   ipcMain,
   Menu,
   nativeImage,
+  powerMonitor,
   screen,
   session,
   Tray
@@ -22,17 +24,44 @@ const {
   PERFORMANCE_FINGERPRINT_SCHEMA_VERSION,
   PERFORMANCE_METRIC_SOURCE,
   PERFORMANCE_REPORT_SCHEMA_VERSION,
+  candidateFingerprintForProject,
   compensatedTickerDelay,
   evaluatePerformanceReport,
   nextTickerSchedule,
   nextTickerDelay,
+  performancePhaseWaitMs,
   petRenderKey,
   runtimeFingerprintForProject,
   summarizePerformancePhase,
   summarizeProcessLifecycle
 } = require('./performance-audit');
-const { fitCaptureToLogicalBounds } = require('./scenario-capture');
+const {
+  boundedCaptureRetry,
+  centipedeCaptureMilestone,
+  centeredFormationOffset,
+  createBoundedWindowUpdater,
+  createNativeWindowUpdateGate,
+  cropDesktopCapture,
+  cursorEffectBounds,
+  cursorPoopSize,
+  desktopForegroundRatio,
+  desktopPixelMatchRatio,
+  desktopSurfaceMatchRatio,
+  fitCaptureToLogicalBounds,
+  groupShoutEvidenceLayout,
+  presentAlwaysOnTopWindow,
+  presentAlwaysOnTopWindowBounded,
+  presentValidationSurfaceBehindPets,
+  runtimeEvidenceCoverage,
+  runtimeEvidenceLayout,
+  runtimeEvidenceMotion,
+  runtimeValidationArea,
+  scenarioCapturePolicy
+} = require('./scenario-capture');
 const { authorizePetEvent, denySessionPermissions, hardenWebContents } = require('./security');
+const { registerShortcutWithFallback } = require('./shortcut-registration');
+
+app.commandLine.appendSwitch('process-per-site');
 
 const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'config', 'pet.config.json'), 'utf8'));
 const behaviors = JSON.parse(fs.readFileSync(path.join(__dirname, 'config', 'behaviors.json'), 'utf8'));
@@ -42,14 +71,20 @@ const EFFECT_PAGE = path.join(__dirname, 'renderer', 'effect.html');
 
 let engine;
 let tray;
+let registeredPauseShortcut = behaviors.hotkeys.pause;
 let cursorPoopWindow;
 let droppingPoopWindow;
+let validationWindow;
 let ticker;
 let tickerDeadline = null;
 let previousTick = Date.now();
+const EFFECT_TOPMOST_REASSERT_MS = 5000;
+const EFFECT_POSITION_UPDATE_MS = 100;
+const updateEffectWindowBounds = createBoundedWindowUpdater(EFFECT_POSITION_UPDATE_MS);
 let quitting = false;
 let scenarioTest = null;
 let performanceAudit = null;
+let nativeWindowUpdateGate = { allowed: () => true };
 const petWindows = new Map();
 const droppingWindows = new Map();
 const dragStates = new Map();
@@ -204,7 +239,7 @@ function createPetWindow(character) {
     if (shown || win.isDestroyed()) return;
     shown = true;
     setWindowInteractive(win, false);
-    win.showInactive();
+    presentAlwaysOnTopWindow(win, config.render.alwaysOnTop);
     visiblePetIds.add(character.id);
     win.webContents.send('pet:present-request');
   };
@@ -213,6 +248,92 @@ function createPetWindow(character) {
   win.loadFile(PET_PAGE);
   win.on('closed', () => petWindows.delete(character.id));
   petWindows.set(character.id, entry);
+}
+
+function validationSurfaceHtml(label) {
+  const safeLabel = String(label || 'NORMAL MODE').replace(/[<>&"']/g, '');
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; script-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'">
+  <style>
+    :root { color-scheme: light; font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    body {
+      position: relative;
+      color: #53616d;
+      background:
+        radial-gradient(circle at 28% 20%, rgba(255,255,255,.98), rgba(255,255,255,0) 42%),
+        linear-gradient(145deg, #eef3f6 0%, #e7edf1 58%, #dfe7eb 100%);
+    }
+    .tag { position: absolute; top: 24px; left: 28px; padding: 8px 12px; border: 1px solid rgba(62, 83, 99, .14); border-radius: 999px; background: rgba(255,255,255,.78); font-size: 13px; font-weight: 650; }
+    .context { position: absolute; left: 30px; bottom: 24px; color: #778792; font-size: 12px; }
+    .mode { position: absolute; right: 28px; bottom: 24px; color: #81909a; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="tag">内部验收画布 · 非产品界面</div>
+  <div class="context">受控脱敏背景，不含用户桌面内容</div>
+  <div class="mode">${safeLabel}</div>
+</body>
+</html>`;
+}
+
+function createValidationSurface(area, label) {
+  if (validationWindow && !validationWindow.isDestroyed()) validationWindow.destroy();
+  const win = new BrowserWindow({
+    x: Math.round(area.x),
+    y: Math.round(area.y),
+    width: Math.round(area.width),
+    height: Math.round(area.height),
+    frame: false,
+    transparent: false,
+    backgroundColor: '#edf2f5',
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    show: false,
+    skipTaskbar: true,
+    focusable: false,
+    hasShadow: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      webviewTag: false
+    }
+  });
+  validationWindow = win;
+  win.setIgnoreMouseEvents(true, { forward: false });
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event) => event.preventDefault());
+  win.on('closed', () => {
+    if (validationWindow === win) validationWindow = null;
+  });
+  win.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(validationSurfaceHtml(label))}`);
+  return win;
+}
+
+function showValidationSurface(area, label) {
+  const win = createValidationSurface(area, label);
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Validation surface did not finish loading.')), 3000);
+    const finish = () => {
+      clearTimeout(timeout);
+      if (win.isDestroyed()) return reject(new Error('Validation surface was destroyed before capture.'));
+      presentValidationSurfaceBehindPets(win, [...petWindows.values()].map((entry) => entry.win));
+      resolve(win);
+    };
+    win.webContents.once('did-finish-load', finish);
+    win.webContents.once('did-fail-load', (_event, code, description) => {
+      clearTimeout(timeout);
+      reject(new Error(`Validation surface failed to load (${code}): ${description}`));
+    });
+  });
 }
 
 function createEffectWindow(asset, size) {
@@ -237,13 +358,18 @@ function createEffectWindow(asset, size) {
 }
 
 function createCursorPoopWindow() {
-  const size = Math.max(28, config.render.effectSize + 8);
+  const size = cursorPoopSize(config.render.effectSize);
   cursorPoopWindow = createEffectWindow('poop', size);
   return cursorPoopWindow;
 }
 
 function ensureCursorPoopWindow() {
   return !cursorPoopWindow || cursorPoopWindow.isDestroyed() ? createCursorPoopWindow() : cursorPoopWindow;
+}
+
+function destroyCursorPoopWindow() {
+  if (cursorPoopWindow && !cursorPoopWindow.isDestroyed()) cursorPoopWindow.destroy();
+  cursorPoopWindow = null;
 }
 
 function createDroppingPoopWindow() {
@@ -256,26 +382,41 @@ function ensureDroppingPoopWindow() {
   return !droppingPoopWindow || droppingPoopWindow.isDestroyed() ? createDroppingPoopWindow() : droppingPoopWindow;
 }
 
+function destroyDroppingPoopWindow() {
+  if (droppingPoopWindow && !droppingPoopWindow.isDestroyed()) droppingPoopWindow.destroy();
+  droppingPoopWindow = null;
+}
+
 function reconcileDroppingWindows(droppings) {
   const dropping = droppings[0];
   droppingWindows.clear();
   if (!dropping) {
-    if (droppingPoopWindow && !droppingPoopWindow.isDestroyed() && droppingPoopWindow.isVisible()) droppingPoopWindow.hide();
+    destroyDroppingPoopWindow();
     return;
   }
   const size = behaviors.poopChase?.poopSize || 26;
   const win = ensureDroppingPoopWindow();
   droppingWindows.set(dropping.id, win);
-  if (!safeSetPosition(win, dropping.x - size / 2, dropping.y - size / 2, `dropping:${dropping.id}`, size, size)) {
+  const positionResult = updateEffectWindowBounds(win, () => safeSetPosition(
+    win,
+    dropping.x - size / 2,
+    dropping.y - size / 2,
+    `dropping:${dropping.id}`,
+    size,
+    size
+  ));
+  if (!positionResult.succeeded) {
     if (win.isVisible()) win.hide();
     return;
   }
-  if (!win.webContents.isLoading() && !win.isVisible()) win.showInactive();
+  if (!win.webContents.isLoading()) {
+    presentAlwaysOnTopWindowBounded(win, true, { intervalMs: EFFECT_TOPMOST_REASSERT_MS });
+  }
 }
 
 function clearDroppingWindows() {
   droppingWindows.clear();
-  if (droppingPoopWindow && !droppingPoopWindow.isDestroyed() && droppingPoopWindow.isVisible()) droppingPoopWindow.hide();
+  destroyDroppingPoopWindow();
 }
 
 function toggleCentipede() {
@@ -286,6 +427,21 @@ function toggleCentipede() {
 function togglePoopChase() {
   engine.togglePoopChase(screen.getCursorScreenPoint());
   refreshTrayMenu();
+}
+
+function adaptiveChaseRuntimeMode() {
+  return config.selection?.chaseVariant === 'self-poop' ? 'poopChase' : 'centipede';
+}
+
+function adaptiveChaseEnabled() {
+  return adaptiveChaseRuntimeMode() === 'poopChase'
+    ? Boolean(behaviors.poopChase?.enabled)
+    : Boolean(behaviors.centipede?.enabled);
+}
+
+function toggleAdaptiveChase() {
+  if (adaptiveChaseRuntimeMode() === 'poopChase') togglePoopChase();
+  else toggleCentipede();
 }
 
 function broadcastPauseState() {
@@ -305,18 +461,18 @@ function togglePause() {
 }
 
 function menuTemplate() {
+  const adaptiveChaseActive = engine.mode === adaptiveChaseRuntimeMode();
   return [
-    { label: '参与人物叫爸爸', accelerator: behaviors.hotkeys.dad, click: () => engine.callDad() },
-    { label: '参与人物叫爷爷', accelerator: behaviors.hotkeys.grandpa, click: () => engine.callGrandpa() },
+    { label: '集体跪喊爸爸', accelerator: behaviors.hotkeys.dad, enabled: Boolean(behaviors.groupShout?.enabled), click: () => engine.callDad() },
+    { label: '集体跪喊爷爷', accelerator: behaviors.hotkeys.grandpa, enabled: Boolean(behaviors.groupShout?.enabled), click: () => engine.callGrandpa() },
     { type: 'separator' },
-    { label: engine.mode === 'centipede' ? '退出人体蜈蚣模式' : '人体蜈蚣模式', accelerator: behaviors.hotkeys.centipede, click: toggleCentipede },
     {
-      label: engine.mode === 'poopChase' ? '退出接力模式' : '接力模式',
-      accelerator: behaviors.hotkeys.poopChase,
-      enabled: Boolean(behaviors.poopChase?.enabled),
-      click: togglePoopChase
+      label: adaptiveChaseActive ? '退出屎追逐模式' : '屎追逐模式',
+      accelerator: behaviors.hotkeys.chase || (adaptiveChaseRuntimeMode() === 'poopChase' ? behaviors.hotkeys.poopChase : behaviors.hotkeys.centipede),
+      enabled: adaptiveChaseEnabled(),
+      click: toggleAdaptiveChase
     },
-    { label: engine.paused ? '继续' : '暂停', accelerator: behaviors.hotkeys.pause, click: togglePause },
+    { label: engine.paused ? '继续' : '暂停', accelerator: registeredPauseShortcut || undefined, click: togglePause },
     { label: '重新散开', click: () => engine.respawn() },
     { type: 'separator' },
     { label: '退出桌宠', click: () => { quitting = true; app.quit(); } }
@@ -336,43 +492,164 @@ function createTray() {
 }
 
 function registerShortcuts() {
-  const registrations = [
-    [behaviors.hotkeys.dad, () => engine.callDad()],
-    [behaviors.hotkeys.grandpa, () => engine.callGrandpa()],
-    [behaviors.hotkeys.centipede, toggleCentipede],
-    [behaviors.hotkeys.poopChase, togglePoopChase],
-    [behaviors.hotkeys.pause, togglePause]
-  ];
+  registeredPauseShortcut = registerShortcutWithFallback({
+    primary: behaviors.hotkeys.pause,
+    fallback: behaviors.hotkeys.pauseFallback,
+    callback: togglePause,
+    register: (accelerator, callback) => globalShortcut.register(accelerator, callback),
+    warn: (message) => console.warn(message)
+  });
+  const registrations = [];
+  if (behaviors.groupShout?.enabled) {
+    registrations.push([behaviors.hotkeys.dad, () => engine.callDad()]);
+    registrations.push([behaviors.hotkeys.grandpa, () => engine.callGrandpa()]);
+  }
+  if (adaptiveChaseEnabled()) {
+    registrations.push([
+      behaviors.hotkeys.chase || (adaptiveChaseRuntimeMode() === 'poopChase' ? behaviors.hotkeys.poopChase : behaviors.hotkeys.centipede),
+      toggleAdaptiveChase
+    ]);
+  }
   for (const [accelerator, callback] of registrations) {
     if (!accelerator) continue;
     if (!globalShortcut.register(accelerator, callback)) console.warn(`Global shortcut unavailable: ${accelerator}`);
   }
+  refreshTrayMenu();
 }
 
 
 function stageGroupShoutScenario(primary) {
-  const size = config.render.spriteSize;
-  const width = Math.max(1, primary.workArea.width - size);
-  const height = Math.max(1, primary.workArea.height - size);
-  const points = [
-    [0.04, 0.12],
-    [0.82, 0.25],
-    [0.18, 0.55],
-    [0.68, 0.72],
-    [0.46, 0.06]
-  ];
+  const participants = engine.shoutParticipants();
+  const recipient = engine.shoutRecipient();
+  const formation = engine.groupShoutTargets(participants, recipient);
+  if (formation.skippedReason) return;
+  const targets = participants.map((pet) => ({ id: pet.id, ...formation.participantTargets.get(pet.id) }));
+  if (recipient && formation.recipientTarget) targets.push({ id: recipient.id, ...formation.recipientTarget });
+  const starts = new Map(groupShoutEvidenceLayout(targets, primary.workArea, config.render.spriteSize).map((point) => [point.id, point]));
+  const targetById = new Map(targets.map((point) => [point.id, point]));
+  const actorIds = new Set(targets.map((point) => point.id));
   engine.pets.forEach((pet, index) => {
-    const point = points[index % points.length];
-    pet.x = primary.workArea.x + width * point[0];
-    pet.y = primary.workArea.y + height * point[1];
+    const point = starts.get(pet.id) || {
+      x: primary.workArea.x + primary.workArea.width - config.render.spriteSize - 20,
+      y: primary.workArea.y + 20 + index * Math.max(16, config.render.spriteSize * 0.15)
+    };
+    const target = targetById.get(pet.id);
+    pet.x = point.x;
+    pet.y = point.y;
     pet.vx = 0;
     pet.vy = 0;
-    pet.direction = index % 2 ? 'left' : 'right';
+    pet.direction = target && target.x < point.x ? 'left' : 'right';
     pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
     pet.frame = 0;
     pet.phrase = '';
     pet.phraseUntil = 0;
+    if (!actorIds.has(pet.id)) pet.dragging = false;
   });
+}
+
+function stageProductEvidenceLayout(display) {
+  const { area, points } = runtimeEvidenceLayout(
+    display.workArea,
+    engine.pets.length,
+    config.render.spriteSize,
+    config.render.windowSize
+  );
+  const motions = runtimeEvidenceMotion(
+    points,
+    area,
+    config.render.spriteSize,
+    config.render.windowSize
+  );
+  const windowPadding = (config.render.windowSize - config.render.spriteSize) / 2;
+  engine.displays = engine.normalizeDisplays([{ id: display.id, workArea: area }]);
+  engine.nextDadAt = Number.POSITIVE_INFINITY;
+  engine.nextTurnAt = Number.POSITIVE_INFINITY;
+  engine.pets.forEach((pet, index) => {
+    const point = points[index];
+    const motion = motions[index];
+    const direction = motion.direction;
+    pet.x = point.x;
+    pet.y = point.y;
+    pet.vx = motion.vx;
+    pet.vy = motion.vy;
+    pet.direction = direction;
+    pet.action = direction === 'right' ? 'crawl_right' : 'crawl_left';
+    pet.frame = 0;
+    pet.phrase = '';
+    pet.phraseUntil = 0;
+    const entry = petWindows.get(pet.id);
+    if (!entry || entry.win.isDestroyed()) return;
+    const windowX = pet.x - windowPadding;
+    const windowY = pet.y - windowPadding;
+    const nextBounds = { x: windowX, y: windowY, width: config.render.windowSize, height: config.render.windowSize };
+    if (safeSetPosition(entry.win, windowX, windowY, `runtime-evidence:${pet.id}`, config.render.windowSize, config.render.windowSize)) {
+      entry.lastBounds = nextBounds;
+    }
+    entry.lastRenderKey = null;
+    if (!entry.win.webContents.isLoading()) entry.win.webContents.send('pet:state', pet);
+  });
+  if (engine.paused) engine.togglePause();
+  broadcastPauseState();
+  return area;
+}
+
+function stageSmokeLayout() {
+  const workArea = screen.getPrimaryDisplay().workArea;
+  const windowSize = config.render.windowSize;
+  const padding = (windowSize - config.render.spriteSize) / 2;
+  const gap = Math.max(12, Math.round(windowSize * 0.08));
+  const totalWidth = engine.pets.length * windowSize + Math.max(0, engine.pets.length - 1) * gap;
+  const startX = Math.round(workArea.x + Math.max(0, (workArea.width - totalWidth) / 2));
+  const windowY = Math.round(workArea.y + Math.max(0, workArea.height - windowSize - 48));
+  engine.pets.forEach((pet, index) => {
+    const entry = petWindows.get(pet.id);
+    const windowX = startX + index * (windowSize + gap);
+    pet.x = windowX + padding;
+    pet.y = windowY + padding;
+    pet.vx = 0;
+    pet.vy = 0;
+    pet.direction = 'right';
+    pet.action = 'idle_right';
+    pet.frame = 0;
+    pet.phrase = '';
+    pet.phraseUntil = 0;
+    if (!entry || entry.win.isDestroyed()) return;
+    const nextBounds = { x: windowX, y: windowY, width: windowSize, height: windowSize };
+    if (safeSetPosition(entry.win, windowX, windowY, `smoke:${pet.id}`, windowSize, windowSize)) entry.lastBounds = nextBounds;
+    entry.lastRenderKey = null;
+    if (!entry.win.webContents.isLoading()) entry.win.webContents.send('pet:state', pet);
+  });
+  if (!engine.paused) engine.togglePause();
+  broadcastPauseState();
+}
+
+function scenarioDisplay(primary) {
+  const raw = process.env.PET_SCENARIO_WORK_AREA;
+  if (!raw) {
+    return {
+      ...primary,
+      workArea: runtimeValidationArea(primary.workArea, config.render.spriteSize, engine.pets.length)
+    };
+  }
+  const values = raw.split(',').map((value) => Number(value.trim()));
+  if (values.length !== 4 || values.some((value) => !Number.isFinite(value))) {
+    throw new Error('PET_SCENARIO_WORK_AREA must be offsetX,offsetY,width,height.');
+  }
+  const [offsetX, offsetY, width, height] = values;
+  const workArea = {
+    x: primary.workArea.x + Math.round(offsetX),
+    y: primary.workArea.y + Math.round(offsetY),
+    width: Math.round(width),
+    height: Math.round(height)
+  };
+  const insidePhysicalDisplay = workArea.width > 0 && workArea.height > 0 &&
+    workArea.x >= primary.workArea.x && workArea.y >= primary.workArea.y &&
+    workArea.x + workArea.width <= primary.workArea.x + primary.workArea.width &&
+    workArea.y + workArea.height <= primary.workArea.y + primary.workArea.height;
+  if (!insidePhysicalDisplay) {
+    throw new Error('PET_SCENARIO_WORK_AREA must stay inside the physical primary work area.');
+  }
+  return { ...primary, workArea };
 }
 
 function startScenarioTest() {
@@ -380,7 +657,11 @@ function startScenarioTest() {
   const groupShout = scenario === 'dad-shout' || scenario === 'grandpa-shout';
   if (!groupShout && scenario !== 'poop-chase' && scenario !== 'centipede') return;
   engine.nextDadAt = Number.POSITIVE_INFINITY;
-  const primary = screen.getPrimaryDisplay();
+  const primary = scenarioDisplay(screen.getPrimaryDisplay());
+  engine.displays = engine.normalizeDisplays([{ id: primary.id, workArea: primary.workArea }]);
+  const validationReady = process.env.PET_SCENARIO_CAPTURE_DIR
+    ? showValidationSurface(primary.workArea, `SCENARIO · ${String(scenario || '').toUpperCase()}`)
+    : Promise.resolve(null);
   const direction = process.env.PET_SCENARIO_DIRECTION === 'left' ? 'left' : 'right';
   const size = config.render.spriteSize;
   let leader;
@@ -416,17 +697,40 @@ function startScenarioTest() {
     const rightHead = engine.anchorsFor(leader, 'right').head;
     const leftHead = engine.anchorsFor(leader, 'left').head;
     const followAnchor = { x: (rightHead[0] + leftHead[0]) / 2, y: (rightHead[1] + leftHead[1]) / 2 };
-    leader.x = primary.workArea.x + Math.min(520, primary.workArea.width * 0.48);
-    leader.y = primary.workArea.y + primary.workArea.height * 0.48;
+    leader.x = primary.workArea.x + Math.min(360, primary.workArea.width * 0.32);
+    leader.y = primary.workArea.y + primary.workArea.height * 0.24;
     leader.direction = direction;
+    if (scenario === 'poop-chase') {
+      const staged = engine.arrangePoopChaseRow(poopParticipants.participants, poopParticipants.settings, primary);
+      if (staged.skippedReason) return;
+      leader = poopParticipants.participants[0] || leader;
+    }
     const initialCursor = { x: leader.x + followAnchor.x * size, y: leader.y + followAnchor.y * size };
-    if (scenario === 'poop-chase') engine.togglePoopChase(initialCursor);
-    else engine.toggleCentipede(initialCursor);
+    if (scenario === 'poop-chase') {
+      engine.togglePoopChase(initialCursor);
+    } else {
+      engine.toggleCentipede(initialCursor);
+      const centipedeParticipants = engine.centipedeParticipants();
+      participantIds = centipedeParticipants.map((pet) => pet.id);
+      const centipedeFrames = centipedeParticipants.map((pet) => ({
+        x: pet.x,
+        y: pet.y,
+        width: size,
+        height: size
+      }));
+      const offset = centeredFormationOffset(centipedeFrames, primary.workArea, { x: 0.34, y: 0.52 });
+      for (const pet of centipedeParticipants) {
+        pet.x += offset.x;
+        pet.y += offset.y;
+      }
+      leader = centipedeParticipants[0] || leader;
+    }
     originCursor = { x: leader.x + followAnchor.x * size, y: leader.y + followAnchor.y * size };
+    const scenarioTravel = Math.min(280, primary.workArea.width * 0.24);
     targetCursor = {
       x: direction === 'left'
-        ? Math.max(primary.workArea.x + 140, originCursor.x - 360)
-        : Math.min(primary.workArea.x + primary.workArea.width - 140, originCursor.x + 360),
+        ? Math.max(primary.workArea.x + 220, originCursor.x - scenarioTravel)
+        : Math.min(primary.workArea.x + primary.workArea.width - 220, originCursor.x + scenarioTravel),
       y: originCursor.y
     };
   }
@@ -445,17 +749,24 @@ function startScenarioTest() {
     participantIds,
     excludedIds,
     skippedReason,
+    display: primary,
+    validationReady,
     workArea: primary.workArea,
     samples: [],
     captures: [],
     capturedLabels: new Set(),
-    capturePromises: []
+    capturePromises: [],
+    captureInProgress: false,
+    lastPoopTargetId: scenario === 'poop-chase' ? engine.droppings[0]?.targetId || null : null
   };
   const captureAtMs = Math.max(500, Number.parseInt(process.env.PET_SCENARIO_CAPTURE_AT_MS || '2500', 10));
   if (!groupShout && process.env.PET_SCENARIO_CAPTURE_DIR) {
     setTimeout(() => requestScenarioCapture(null), captureAtMs).unref();
   }
-  const fallbackDuration = groupShout ? 12000 : 6000;
+  // Eight people can need roughly ten seconds to gather across a large desktop at
+  // the deliberately visible 180 px/s speed. Leave enough time for kneeling and
+  // all three 1.4-second shout frames after the slow formation completes.
+  const fallbackDuration = groupShout ? 20000 : 6000;
   const durationMs = Math.max(3000, Number.parseInt(process.env.PET_SCENARIO_DURATION_MS || String(fallbackDuration), 10));
   setTimeout(async () => {
     if (ticker) {
@@ -477,6 +788,7 @@ function startScenarioTest() {
         participantIds,
         excludedIds,
         skippedReason,
+        workArea: scenarioTest?.workArea || primary.workArea,
         captures: scenarioTest?.captures || [],
         samples: scenarioTest?.samples || []
       };
@@ -546,39 +858,82 @@ function recordScenarioSample(snapshot, cursor) {
   });
 }
 
-function requestScenarioCapture(label) {
+function requestScenarioCapture(label, expectedPhase = null, evidence = null) {
   if (!scenarioTest || !process.env.PET_SCENARIO_CAPTURE_DIR) return;
   const key = label || 'active';
   if (scenarioTest.capturedLabels.has(key)) return;
+  const outputDir = process.env.PET_SCENARIO_CAPTURE_DIR;
+  const errorFile = path.join(outputDir, `capture-${key}-error.txt`);
   scenarioTest.capturedLabels.add(key);
+  scenarioTest.captureInProgress = true;
   const promise = new Promise((resolve) => setTimeout(resolve, 80))
-    .then(() => captureScenarioWindows(label))
+    .then(() => captureScenarioWindows(label, expectedPhase, evidence))
+    .then(() => fs.rmSync(errorFile, { force: true }))
     .catch((error) => {
-      const outputDir = process.env.PET_SCENARIO_CAPTURE_DIR;
+      scenarioTest?.capturedLabels.delete(key);
       fs.mkdirSync(outputDir, { recursive: true });
-      fs.writeFileSync(path.join(outputDir, `capture-${key}-error.txt`), `${publicErrorMessage(error)}\n`, 'utf8');
+      fs.writeFileSync(errorFile, `${publicErrorMessage(error)}\n`, 'utf8');
+    })
+    .finally(() => {
+      if (scenarioTest) scenarioTest.captureInProgress = false;
     });
   scenarioTest.capturePromises.push(promise);
 }
 
 function captureScenarioMilestone(snapshot) {
   if (!scenarioTest || !process.env.PET_SCENARIO_CAPTURE_DIR) return;
-  if (scenarioTest.scenario !== 'dad-shout' && scenarioTest.scenario !== 'grandpa-shout') return;
   const elapsed = (Date.now() - scenarioTest.startedAt) / 1000;
+  if (scenarioTest.scenario === 'centipede') {
+    const cursor = scenarioCursor();
+    if (!cursor) return;
+    const milestone = centipedeCaptureMilestone({
+      snapshot,
+      participantIds: scenarioTest.participantIds,
+      leaderId: scenarioTest.leaderId,
+      captures: scenarioTest.captures,
+      elapsedMs: elapsed * 1000,
+      cursor
+    });
+    if (milestone) requestScenarioCapture(milestone.label, snapshot.mode, milestone.evidence);
+    return;
+  }
+  if (scenarioTest.scenario === 'poop-chase') {
+    const eater = snapshot.pets.find((pet) => pet.action.startsWith('eat_') && pet.effect === 'stink');
+    if (eater) {
+      requestScenarioCapture(`eating-${eater.id}`, snapshot.mode, {
+        kind: 'eating-climax',
+        elapsedMs: Math.round(elapsed * 1000),
+        eaterId: eater.id
+      });
+    }
+    const nextEaterId = snapshot.droppings[0]?.targetId || null;
+    const returningEaterId = scenarioTest.lastPoopTargetId;
+    if (nextEaterId && returningEaterId && nextEaterId !== returningEaterId) {
+      requestScenarioCapture(`handoff-${returningEaterId}-to-${nextEaterId}`, snapshot.mode, {
+        kind: 'handoff-return',
+        elapsedMs: Math.round(elapsed * 1000),
+        returningEaterId: returningEaterId,
+        nextEaterId: nextEaterId
+      });
+    }
+    if (nextEaterId) scenarioTest.lastPoopTargetId = nextEaterId;
+    return;
+  }
+  if (scenarioTest.scenario !== 'dad-shout' && scenarioTest.scenario !== 'grandpa-shout') return;
   if (snapshot.shoutPhase === 'forming') {
-    if (elapsed >= 0.5) requestScenarioCapture('forming-early');
-    if (elapsed >= 2.0) requestScenarioCapture('forming-late');
+    if (elapsed >= 0.5) requestScenarioCapture('forming-early', snapshot.shoutPhase);
+    if (elapsed >= 2.0) requestScenarioCapture('forming-late', snapshot.shoutPhase);
     return;
   }
   if (snapshot.shoutPhase === 'kneeling') {
-    requestScenarioCapture('kneeling');
+    requestScenarioCapture('kneeling', snapshot.shoutPhase);
     return;
   }
   if (snapshot.shoutPhase === 'shouting') {
     const participant = snapshot.pets.find((pet) => scenarioTest.participantIds.includes(pet.id));
     if (!participant) return;
     const frame = Math.max(0, Math.min(2, Math.floor(participant.frame || 0)));
-    requestScenarioCapture(`shout-${frame}`);
+    requestScenarioCapture(`shout-${frame}`, snapshot.shoutPhase);
   }
 }
 
@@ -627,59 +982,299 @@ function compositeScenarioImages(items, workArea) {
   return nativeImage.createFromBitmap(bitmap, { width, height, scaleFactor: 1 }).toPNG();
 }
 
-async function captureScenarioWindows(label = null) {
-  const outputDir = process.env.PET_SCENARIO_CAPTURE_DIR;
-  if (!outputDir || !scenarioTest) return;
-  const captureDir = label ? path.join(outputDir, label) : outputDir;
-  fs.mkdirSync(captureDir, { recursive: true });
-  const frames = [];
+async function capturePetWindowComposition(workArea) {
   const compositeItems = [];
+  const characters = [];
+  for (const [id, entry] of petWindows) {
+    if (entry.win.isDestroyed() || !entry.win.isVisible()) continue;
+    const image = await boundedCaptureRetry(() => entry.win.webContents.capturePage());
+    const bounds = entry.win.getBounds();
+    compositeItems.push({ image: fitCaptureToLogicalBounds(image, bounds), bounds });
+    const bitmap = image.toBitmap();
+    let visiblePixels = 0;
+    for (let offset = 3; offset < bitmap.length; offset += 4) {
+      if (bitmap[offset] > 12) visiblePixels += 1;
+    }
+    characters.push({
+      id,
+      visible: true,
+      bounds,
+      alphaCoverage: Number((visiblePixels / Math.max(1, bitmap.length / 4)).toFixed(6))
+    });
+  }
+  if (!compositeItems.length) throw new Error('No visible pet window was available for smoke capture.');
+  return {
+    bytes: compositeScenarioImages(compositeItems, scenarioCompositionBounds(compositeItems, workArea)),
+    characters
+  };
+}
+
+async function captureRuntimeCharacterEvidence(desktopImage, surfaceImage, captureArea) {
+  const characters = [];
+  const surfaceBounds = validationWindow.getBounds();
   for (const [id, entry] of petWindows) {
     if (entry.win.isDestroyed()) continue;
     const image = await entry.win.webContents.capturePage();
+    const bounds = entry.win.getBounds();
+    characters.push({
+      id,
+      visible: entry.win.isVisible(),
+      bounds,
+      desktopForegroundRatio: Number(desktopForegroundRatio(
+        bounds,
+        desktopImage,
+        surfaceImage,
+        surfaceBounds,
+        captureArea
+      ).toFixed(4)),
+      desktopMatchRatio: Number(desktopPixelMatchRatio(
+        image,
+        bounds,
+        desktopImage,
+        captureArea
+      ).toFixed(4))
+    });
+  }
+  const issues = runtimeEvidenceCoverage(
+    engine.pets.map((pet) => pet.id),
+    characters,
+    captureArea
+  );
+  if (issues.length) throw new Error(`Runtime compositor evidence is incomplete: ${issues.join('; ')}.`);
+  return characters;
+}
+
+async function captureDesktopWithPets(display, logicalArea = null) {
+  const scaleFactor = Number.isFinite(display?.scaleFactor) && display.scaleFactor > 0 ? display.scaleFactor : 1;
+  const displaySize = display?.size || display?.bounds || display?.workArea;
+  const width = Math.max(1, Math.round((displaySize?.width || 1) * scaleFactor));
+  const height = Math.max(1, Math.round((displaySize?.height || 1) * scaleFactor));
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: { width, height },
+    fetchWindowIcons: false
+  });
+  const displayId = String(display?.id ?? '');
+  const source = sources.find((item) => String(item.display_id || '') === displayId) || sources[0];
+  if (!source || source.thumbnail.isEmpty()) throw new Error('Primary display capture was unavailable.');
+  const capture = logicalArea ? cropDesktopCapture(source.thumbnail, display, logicalArea) : source.thumbnail;
+  return capture.toPNG();
+}
+
+async function waitForScenarioSprites(timeoutMs = 1400) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = [];
+  while (Date.now() < deadline) {
+    latest = await Promise.all([...petWindows.entries()].map(async ([id, entry]) => {
+      if (entry.win.isDestroyed()) return { id, ready: false, destroyed: true };
+      try {
+        return await entry.win.webContents.executeJavaScript(
+          `(() => {
+            const sprite = document.getElementById('sprite');
+            return {
+              id: ${JSON.stringify(id)},
+              ready: document.body.dataset.spriteReady === 'true' && (sprite?.naturalWidth || 0) > 0,
+              action: document.body.dataset.action || '',
+              src: sprite?.getAttribute('src') || '',
+              currentSrc: sprite?.currentSrc || '',
+              naturalWidth: sprite?.naturalWidth || 0,
+              complete: Boolean(sprite?.complete)
+            };
+          })()`,
+          true
+        );
+      } catch {
+        return { id, ready: false, evaluationFailed: true };
+      }
+    }));
+    if (latest.length && latest.every((entry) => entry.ready)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const failures = latest.filter((entry) => !entry.ready);
+  throw new Error(`Scenario sprites did not finish loading before capture: ${JSON.stringify(failures)}`);
+}
+
+function runtimeEvidenceEntry(kind, file, bytes, manifestFile) {
+  const image = nativeImage.createFromBuffer(bytes);
+  const size = image.getSize();
+  return {
+    kind,
+    file: path.relative(path.dirname(manifestFile), file).split(path.sep).join('/'),
+    sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    width: size.width,
+    height: size.height
+  };
+}
+
+async function captureScenarioWindows(label = null, expectedPhase = null, evidence = null) {
+  const outputDir = process.env.PET_SCENARIO_CAPTURE_DIR;
+  if (!outputDir || !scenarioTest) return;
+  const capturedPhase = engine.snapshot().shoutPhase || engine.mode;
+  if (expectedPhase && capturedPhase !== expectedPhase) {
+    throw new Error(`Scenario capture ${label || 'active'} changed from ${expectedPhase} to ${capturedPhase} before capture.`);
+  }
+  const captureDir = label ? path.join(outputDir, label) : outputDir;
+  fs.mkdirSync(captureDir, { recursive: true });
+  await waitForScenarioSprites();
+  const frames = [];
+  const frameImages = [];
+  for (const [id, entry] of petWindows) {
+    if (entry.win.isDestroyed()) continue;
+    const image = await boundedCaptureRetry(() => entry.win.webContents.capturePage());
     const file = `${id}.png`;
     const fullPath = path.join(captureDir, file);
     fs.writeFileSync(fullPath, image.toPNG());
     const bounds = entry.win.getBounds();
-    frames.push({
+    const frame = {
       id,
       file: path.relative(outputDir, fullPath).split(path.sep).join('/'),
       bounds,
       visible: entry.win.isVisible()
-    });
-    compositeItems.push({ image: fitCaptureToLogicalBounds(image, bounds), bounds });
+    };
+    frames.push(frame);
+    frameImages.push({ frame, image, bounds });
   }
   const droppings = [];
+  const droppingImages = [];
   for (const [id, win] of [...droppingWindows]) {
     if (win.isDestroyed()) continue;
-    const image = await win.webContents.capturePage();
+    const image = await boundedCaptureRetry(() => win.webContents.capturePage());
     const file = `dropping-${id}.png`;
     const fullPath = path.join(captureDir, file);
     fs.writeFileSync(fullPath, image.toPNG());
     const bounds = win.getBounds();
-    droppings.push({
+    const dropping = {
       id,
       file: path.relative(outputDir, fullPath).split(path.sep).join('/'),
       bounds,
       visible: win.isVisible()
-    });
-    compositeItems.push({ image: fitCaptureToLogicalBounds(image, bounds), bounds });
+    };
+    droppings.push(dropping);
+    droppingImages.push({ dropping, image, bounds });
+  }
+  const effects = [];
+  const effectImages = [];
+  if (scenarioTest.scenario === 'centipede' && cursorPoopWindow && !cursorPoopWindow.isDestroyed()) {
+    const image = await boundedCaptureRetry(() => cursorPoopWindow.webContents.capturePage());
+    const fullPath = path.join(captureDir, 'cursor-poop.png');
+    fs.writeFileSync(fullPath, image.toPNG());
+    const bounds = cursorPoopWindow.getBounds();
+    const effect = {
+      role: 'cursor-poop',
+      file: path.relative(outputDir, fullPath).split(path.sep).join('/'),
+      bounds,
+      visible: cursorPoopWindow.isVisible()
+    };
+    effects.push(effect);
+    effectImages.push({ effect, image, bounds });
   }
   const compositionFile = label ? `${label}.png` : 'composition.png';
-  fs.writeFileSync(path.join(outputDir, compositionFile), compositeScenarioImages(compositeItems, scenarioCompositionBounds(compositeItems, scenarioTest.workArea)));
+  await scenarioTest.validationReady;
+  presentValidationSurfaceBehindPets(
+    validationWindow,
+    [...petWindows.values()].map((entry) => entry.win)
+  );
+  for (const win of droppingWindows.values()) presentAlwaysOnTopWindow(win, true);
+  presentAlwaysOnTopWindow(cursorPoopWindow, true);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  let composition;
+  let capturePolicy;
+  let surfaceMatchRatio = null;
+  const compositionBounds = { ...scenarioTest.workArea };
+  try {
+    composition = await captureDesktopWithPets(scenarioTest.display, scenarioTest.workArea);
+    capturePolicy = scenarioCapturePolicy({ desktopAvailable: true, developmentFallbackRequested: false });
+  } catch (error) {
+    capturePolicy = scenarioCapturePolicy({
+      desktopAvailable: false,
+      developmentFallbackRequested: process.env.PET_DEVELOPMENT_COMPOSITE_FALLBACK === '1'
+    });
+    const compositeItems = [...frameImages, ...droppingImages, ...effectImages].map((item) => ({
+      image: fitCaptureToLogicalBounds(item.image, item.bounds),
+      bounds: item.bounds
+    }));
+    composition = compositeScenarioImages(
+      compositeItems,
+      compositionBounds
+    );
+  }
+  if (capturePolicy.releaseEligible) {
+    const desktopImage = nativeImage.createFromBuffer(composition);
+    const surfaceImage = await validationWindow.webContents.capturePage();
+    surfaceMatchRatio = Number(desktopSurfaceMatchRatio(
+      surfaceImage,
+      validationWindow.getBounds(),
+      desktopImage,
+      scenarioTest.workArea
+    ).toFixed(4));
+    if (surfaceMatchRatio < 0.8) {
+      throw new Error(`Controlled validation surface was not visible in the desktop compositor (${surfaceMatchRatio}).`);
+    }
+    for (const item of frameImages) {
+      item.frame.desktopForegroundRatio = Number(desktopForegroundRatio(
+        item.bounds,
+        desktopImage,
+        surfaceImage,
+        validationWindow.getBounds(),
+        scenarioTest.workArea
+      ).toFixed(4));
+      item.frame.desktopMatchRatio = Number(desktopPixelMatchRatio(
+        item.image,
+        item.bounds,
+        desktopImage,
+        scenarioTest.workArea
+      ).toFixed(4));
+    }
+    for (const item of effectImages) {
+      item.effect.desktopForegroundRatio = Number(desktopForegroundRatio(
+        item.bounds,
+        desktopImage,
+        surfaceImage,
+        validationWindow.getBounds(),
+        scenarioTest.workArea
+      ).toFixed(4));
+      item.effect.desktopMatchRatio = Number(desktopPixelMatchRatio(
+        item.image,
+        item.bounds,
+        desktopImage,
+        scenarioTest.workArea
+      ).toFixed(4));
+    }
+    if (scenarioTest.scenario === 'centipede') {
+      const cursorPoop = effects.find((effect) => effect.role === 'cursor-poop');
+      if (!cursorPoop || !cursorPoop.visible || cursorPoop.desktopForegroundRatio < 0.005 || cursorPoop.desktopMatchRatio < 0.1) {
+        throw new Error('Desktop compositor omitted visible cursor poop.');
+      }
+    }
+    if (scenarioTest.scenario === 'dad-shout' || scenarioTest.scenario === 'grandpa-shout') {
+      const requiredIds = new Set([...scenarioTest.participantIds, scenarioTest.recipientId].filter(Boolean));
+      const occluded = frames.filter((frame) => requiredIds.has(frame.id) && frame.desktopForegroundRatio < 0.005);
+      if (occluded.length) {
+        throw new Error(`Desktop compositor omitted visible pet windows: ${occluded.map((frame) => frame.id).join(', ')}.`);
+      }
+    }
+  }
+  fs.writeFileSync(path.join(outputDir, compositionFile), composition);
   const capture = {
     label: label || 'active',
-    phase: engine.snapshot().shoutPhase || engine.mode,
+    phase: capturedPhase,
     capturedAt: Date.now(),
     composition: compositionFile,
+    captureKind: capturePolicy.captureKind,
+    releaseEligible: capturePolicy.releaseEligible,
+    surfaceMatchRatio,
+    compositionBounds: compositionBounds,
+    evidence: evidence,
     frames,
-    droppings
+    droppings,
+    effects
   };
   scenarioTest.captures.push(capture);
   fs.writeFileSync(path.join(outputDir, 'manifest.json'), `${JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 3,
     scenario: scenarioTest.scenario,
     direction: scenarioTest.direction,
+    compositionBounds: compositionBounds,
     captures: scenarioTest.captures
   }, null, 2)}\n`, 'utf8');
 }
@@ -758,7 +1353,16 @@ function samplePerformanceMetrics() {
       serviceName: metric.serviceName,
       name: metric.name
     })),
-    effectRenderers: effectRendererSnapshot()
+    effectRenderers: effectRendererSnapshot(),
+    petWindows: config.characters.map(({ id }) => {
+      const win = petWindows.get(id)?.win;
+      return {
+        id,
+        pid: win && !win.isDestroyed() ? win.webContents.getOSProcessId() : null,
+        visible: Boolean(win && !win.isDestroyed() && win.isVisible()),
+        destroyed: !win || win.isDestroyed()
+      };
+    })
   });
   const eventLoopMaxMs = performanceAudit.eventLoop.max / 1e6;
   if (Number.isFinite(eventLoopMaxMs)) phase.eventLoopDelaysMs.push(eventLoopMaxMs);
@@ -828,6 +1432,7 @@ function performanceReportBase(status) {
     runtime: performanceAudit.runtime,
     metricSource: PERFORMANCE_METRIC_SOURCE,
     runtimeFingerprint: performanceAudit.runtimeFingerprint,
+    candidateFingerprint: performanceAudit.candidateFingerprint,
     thresholds: DEFAULT_PERFORMANCE_THRESHOLDS,
     startupMeasurement: {
       start: 'runner-before-executable-spawn',
@@ -835,6 +1440,7 @@ function performanceReportBase(status) {
     },
     startupVisibleMs: performanceAudit.startupVisibleMs,
     expectedWindowCount: config.characters.length,
+    expectedPetIds: config.characters.map(({ id }) => id),
     windowCount: presentedPetIds.size,
     phases: performanceAudit.phases,
     processLifecycle: summarizeProcessLifecycle(performanceAudit.phases)
@@ -863,9 +1469,26 @@ async function runTimedPerformancePhase(name, durationMs, enter) {
   if (enter) enter();
   await waitForPerformance(1000);
   beginPerformancePhase(name);
-  await waitForPerformance(durationMs);
+  await waitForPerformance(performancePhaseWaitMs(durationMs));
   endPerformancePhase();
   performanceAudit.cursorMode = null;
+}
+
+async function runEnabledPerformancePhase(name, behaviorKey, durationMs, enter) {
+  const settings = behaviors[behaviorKey];
+  if (!settings) throw new Error(`Missing performance behavior settings: ${behaviorKey}`);
+  const wasEnabled = settings.enabled;
+  settings.enabled = true;
+  try {
+    await runTimedPerformancePhase(name, durationMs, enter);
+  } catch (error) {
+    settings.enabled = wasEnabled;
+    throw error;
+  }
+  return () => {
+    stopSpecialModeForPerformance();
+    settings.enabled = wasEnabled;
+  };
 }
 
 async function runShoutPerformancePhase(name, trigger) {
@@ -891,12 +1514,12 @@ async function runPerformanceAudit() {
     await runTimedPerformancePhase('idle', performanceDuration('PET_PERF_IDLE_MS', 60000), null);
     stopSpecialModeForPerformance();
 
-    await runTimedPerformancePhase('centipede', performanceDuration('PET_PERF_CENTIPEDE_MS', 60000), () => {
+    const finishCentipedePerformance = await runEnabledPerformancePhase('centipede', 'centipede', performanceDuration('PET_PERF_CENTIPEDE_MS', 60000), () => {
       engine.toggleCentipede(performanceCenterCursor());
     });
-    stopSpecialModeForPerformance();
+    finishCentipedePerformance();
 
-    await runTimedPerformancePhase('poop-chase', performanceDuration('PET_PERF_POOP_CHASE_MS', 60000), () => {
+    const finishPoopChasePerformance = await runEnabledPerformancePhase('poop-chase', 'poopChase', performanceDuration('PET_PERF_POOP_CHASE_MS', 60000), () => {
       engine.togglePoopChase(performanceCenterCursor());
     });
 
@@ -914,7 +1537,7 @@ async function runPerformanceAudit() {
     endPerformancePhase();
     pauseContext.stateFingerprintAfter = performanceStateFingerprint();
     if (engine.paused) togglePause();
-    stopSpecialModeForPerformance();
+    finishPoopChasePerformance();
 
     await runShoutPerformancePhase('dad-shout', () => engine.callDad());
     await runShoutPerformancePhase('grandpa-shout', () => engine.callGrandpa());
@@ -947,7 +1570,10 @@ async function runPerformanceAudit() {
       },
       pauseComparison
     };
-    const evaluation = evaluatePerformanceReport(report, DEFAULT_PERFORMANCE_THRESHOLDS, { expectedRuntimeFingerprint: performanceAudit.runtimeFingerprint });
+    const evaluation = evaluatePerformanceReport(report, DEFAULT_PERFORMANCE_THRESHOLDS, {
+      expectedRuntimeFingerprint: performanceAudit.runtimeFingerprint,
+      expectedCandidateFingerprint: performanceAudit.candidateFingerprint
+    });
     report.status = evaluation.pass ? 'pass' : 'fail';
     report.evaluation = evaluation;
     writePerformanceJson(report);
@@ -974,8 +1600,10 @@ function startPerformanceAudit() {
   if (!output) throw new Error('PET_PERFORMANCE_OUT is required for PET_PERFORMANCE_TEST.');
   const launchStartedAtEpochMs = Number(process.env.PET_PERFORMANCE_LAUNCHED_AT_MS);
   const executableSha256 = process.env.PET_PERFORMANCE_EXECUTABLE_SHA256;
-  if (!Number.isFinite(launchStartedAtEpochMs) || !/^[a-f0-9]{64}$/.test(executableSha256 || '')) {
-    throw new Error('Performance runner launch timestamp and executable SHA-256 are required.');
+  const artifactFingerprintSha256 = process.env.PET_PERFORMANCE_ARTIFACT_FINGERPRINT_SHA256;
+  if (!Number.isFinite(launchStartedAtEpochMs) || !/^[a-f0-9]{64}$/.test(executableSha256 || '')
+    || !/^[a-f0-9]{64}$/.test(artifactFingerprintSha256 || '')) {
+    throw new Error('Performance runner launch timestamp, executable SHA-256, and artifact fingerprint are required.');
   }
   const eventLoop = monitorEventLoopDelay({ resolution: 10 });
   eventLoop.enable();
@@ -984,9 +1612,11 @@ function startPerformanceAudit() {
     launchStartedAtEpochMs,
     startupVisibleMs: null,
     runtimeFingerprint: runtimeFingerprintForProject(path.resolve(__dirname, '..')),
+    candidateFingerprint: candidateFingerprintForProject(path.resolve(__dirname, '..')),
     runtime: {
       electronVersion: process.versions.electron,
-      executableSha256
+      executableSha256,
+      artifactFingerprintSha256
     },
     phases: {},
     current: null,
@@ -1017,7 +1647,11 @@ function scheduleTicker(delay) {
 function runTickerFrame() {
     ticker = null;
     recordPerformanceTick(nodePerformance.now());
-    if (engine.paused) {
+    if (scenarioTest?.captureInProgress) {
+      scheduleTicker(16);
+      return;
+    }
+    if (engine.paused && dragStates.size === 0) {
       scheduleTicker();
       return;
     }
@@ -1035,7 +1669,8 @@ function runTickerFrame() {
       });
     }
 
-    const snapshot = engine.update(dt, cursor);
+    const snapshot = engine.paused ? engine.snapshot() : engine.update(dt, cursor);
+    const nativeWindowUpdatesAllowed = nativeWindowUpdateGate.allowed();
     const padding = (config.render.windowSize - config.render.spriteSize) / 2;
     snapshot.pets.forEach((pet) => {
       const entry = petWindows.get(pet.id);
@@ -1046,7 +1681,7 @@ function runTickerFrame() {
         width: config.render.windowSize,
         height: config.render.windowSize
       };
-      if (!entry.lastBounds || entry.lastBounds.x !== nextBounds.x || entry.lastBounds.y !== nextBounds.y) {
+      if (nativeWindowUpdatesAllowed && (!entry.lastBounds || entry.lastBounds.x !== nextBounds.x || entry.lastBounds.y !== nextBounds.y)) {
         if (safeSetPosition(
           entry.win,
           nextBounds.x,
@@ -1063,25 +1698,44 @@ function runTickerFrame() {
       }
     });
 
-    if (snapshot.mode === 'poopChase' && behaviors.prankEffects.enabled) {
-      reconcileDroppingWindows(snapshot.droppings);
-    } else {
-      clearDroppingWindows();
+    const cursorControlledDropping = snapshot.mode === 'poopChase'
+      ? snapshot.droppings.find((dropping) => dropping.cursorControlled === true)
+      : null;
+    if (nativeWindowUpdatesAllowed) {
+      if (snapshot.mode === 'poopChase' && !cursorControlledDropping && behaviors.prankEffects.enabled) {
+        reconcileDroppingWindows(snapshot.droppings);
+      } else {
+        clearDroppingWindows();
+      }
     }
 
-    const showPoop = snapshot.mode === 'centipede' && behaviors.centipede.poopCursor && behaviors.prankEffects.enabled;
-    const poopWindow = showPoop ? ensureCursorPoopWindow() : cursorPoopWindow;
-    if (showPoop && poopWindow && !poopWindow.isDestroyed()) {
-      const cursorSize = Math.max(28, config.render.effectSize + 8);
-      if (safeSetPosition(poopWindow, cursor.x + 10, cursor.y + 10, 'cursor-poop', cursorSize, cursorSize)) {
-        if (!poopWindow.webContents.isLoading() && !poopWindow.isVisible()) poopWindow.showInactive();
+    const showPoop = behaviors.prankEffects.enabled && (
+      (snapshot.mode === 'centipede' && behaviors.centipede.poopCursor) ||
+      Boolean(cursorControlledDropping)
+    );
+    const poopWindow = showPoop && nativeWindowUpdatesAllowed ? ensureCursorPoopWindow() : cursorPoopWindow;
+    if (nativeWindowUpdatesAllowed && !showPoop) destroyCursorPoopWindow();
+    if (nativeWindowUpdatesAllowed && showPoop && poopWindow && !poopWindow.isDestroyed()) {
+      const cursorSize = cursorPoopSize(config.render.effectSize);
+      const positionResult = updateEffectWindowBounds(poopWindow, () => {
+        const cursorWorkArea = scenarioTest?.workArea || screen.getDisplayNearestPoint(cursor).workArea;
+        const effectBounds = cursorEffectBounds(
+          cursor,
+          cursorSize,
+          snapshot.pets.map((pet) => ({ x: pet.x, y: pet.y, width: config.render.spriteSize, height: config.render.spriteSize })),
+          cursorWorkArea
+        );
+        return safeSetPosition(poopWindow, effectBounds.x, effectBounds.y, 'cursor-poop', cursorSize, cursorSize);
+      });
+      if (positionResult.succeeded) {
+        if (!poopWindow.webContents.isLoading()) {
+          presentAlwaysOnTopWindowBounded(poopWindow, true, { intervalMs: EFFECT_TOPMOST_REASSERT_MS });
+        }
       } else if (poopWindow.isVisible()) poopWindow.hide();
-    } else if (poopWindow?.isVisible()) {
-      poopWindow.hide();
     }
     recordScenarioSample(snapshot, cursor);
     captureScenarioMilestone(snapshot);
-    scheduleTicker();
+    scheduleTicker(engine.paused && dragStates.size > 0 ? nextTickerDelay(false) : undefined);
 }
 
 function startTicker() {
@@ -1097,7 +1751,8 @@ function installIpc() {
       config,
       behaviors,
       character: config.characters.find((item) => item.id === authorized.id),
-      sprite: manifest.characters.find((item) => item.id === authorized.id) || manifest.characters[0]
+      sprite: manifest.characters.find((item) => item.id === authorized.id) || manifest.characters[0],
+      state: engine.snapshot().pets.find((pet) => pet.id === authorized.id)
     };
   });
 
@@ -1123,9 +1778,7 @@ function installIpc() {
     const authorized = petFromEvent(event);
     if (!authorized) return;
     if (engine.mode === 'centipede' || engine.mode === 'poopChase') {
-      if (engine.mode === 'centipede') engine.toggleCentipede(screen.getCursorScreenPoint());
-      else engine.togglePoopChase(screen.getCursorScreenPoint());
-      refreshTrayMenu();
+      toggleAdaptiveChase();
       return;
     }
     Menu.buildFromTemplate(menuTemplate()).popup({ window: authorized.entry.win });
@@ -1152,31 +1805,151 @@ function installIpc() {
 
 async function runSmokeCapture() {
   if (process.env.PET_SMOKE_TEST !== '1') return;
-  const output = process.env.PET_SMOKE_OUT || path.join(process.cwd(), 'runtime-window.png');
+  const technicalOutput = process.env.PET_SMOKE_OUT || path.join(process.cwd(), 'runtime-smoke-technical.png');
+  const runtimeOutput = process.env.PET_RUNTIME_OUT || null;
+  const runtimeOutput2 = process.env.PET_RUNTIME_OUT_2 || null;
+  const runtimePausedOutput = process.env.PET_RUNTIME_PAUSED_OUT || null;
+  const manifestOutput = process.env.PET_RUNTIME_EVIDENCE_MANIFEST || null;
   const captureAtMs = smokeDelay('PET_SMOKE_CAPTURE_AT_MS', 1800);
-  const timeoutMs = smokeDelay('PET_SMOKE_TIMEOUT_MS', Math.max(8000, captureAtMs + 5000), captureAtMs + 1000);
+  const runtimeGapMs = smokeDelay('PET_RUNTIME_CAPTURE_GAP_MS', 900, 250);
+  const timeoutMs = smokeDelay('PET_SMOKE_TIMEOUT_MS', Math.max(10000, captureAtMs + runtimeGapMs + 6000), captureAtMs + runtimeGapMs + 1000);
   const finish = () => {
     exitAutomatedTest();
   };
   setTimeout(() => {
-    const errorPath = path.join(path.dirname(output), 'runtime-smoke-error.txt');
+    const errorPath = path.join(path.dirname(technicalOutput), 'runtime-smoke-error.txt');
     fs.mkdirSync(path.dirname(errorPath), { recursive: true });
-    if (!fs.existsSync(output) && !fs.existsSync(errorPath)) fs.writeFileSync(errorPath, 'Smoke capture timed out.\n', 'utf8');
+    if (!fs.existsSync(technicalOutput) && !fs.existsSync(errorPath)) fs.writeFileSync(errorPath, 'Smoke capture timed out.\n', 'utf8');
     finish();
   }, timeoutMs).unref();
   setTimeout(async () => {
     try {
-      const first = petWindows.values().next().value?.win;
-      if (!first || first.isDestroyed()) throw new Error('No pet window was available for smoke capture.');
-      const image = await Promise.race([
-        first.webContents.capturePage(),
+      const display = screen.getPrimaryDisplay();
+      const evidence = [];
+      const validationArea = runtimeValidationArea(display.workArea, config.render.spriteSize, engine.pets.length);
+      if (runtimeOutput || runtimeOutput2 || runtimePausedOutput || manifestOutput) {
+        if (!runtimeOutput || !runtimeOutput2 || !runtimePausedOutput || !manifestOutput) {
+          throw new Error('Runtime evidence requires two live frames, one paused frame, and a manifest output.');
+        }
+        await showValidationSurface(validationArea, 'NORMAL MODE · LIVE MOTION');
+        stageProductEvidenceLayout(display);
+        await waitForPerformance(250);
+        const first = await Promise.race([
+          captureDesktopWithPets(display, validationArea),
+          new Promise((_resolve, reject) => setTimeout(() => reject(new Error('Desktop capture timed out.')), 3000))
+        ]);
+        const firstSurface = await validationWindow.webContents.capturePage();
+        const firstDesktopImage = nativeImage.createFromBuffer(first);
+        const firstSurfaceMatchRatio = Number(desktopSurfaceMatchRatio(
+          firstSurface,
+          validationWindow.getBounds(),
+          firstDesktopImage,
+          validationArea
+        ).toFixed(4));
+        if (firstSurfaceMatchRatio < 0.8) {
+          throw new Error(`Controlled validation surface was not visible in the first runtime compositor frame (${firstSurfaceMatchRatio}).`);
+        }
+        fs.mkdirSync(path.dirname(runtimeOutput), { recursive: true });
+        fs.writeFileSync(runtimeOutput, first);
+        const firstCharacters = await captureRuntimeCharacterEvidence(firstDesktopImage, firstSurface, validationArea);
+        evidence.push({
+          ...runtimeEvidenceEntry('normal-live-1', runtimeOutput, first, manifestOutput),
+          surfaceMatchRatio: firstSurfaceMatchRatio,
+          characters: firstCharacters
+        });
+        await waitForPerformance(runtimeGapMs);
+        const second = await Promise.race([
+          captureDesktopWithPets(display, validationArea),
+          new Promise((_resolve, reject) => setTimeout(() => reject(new Error('Desktop capture timed out.')), 3000))
+        ]);
+        const secondSurface = await validationWindow.webContents.capturePage();
+        const secondDesktopImage = nativeImage.createFromBuffer(second);
+        const secondSurfaceMatchRatio = Number(desktopSurfaceMatchRatio(
+          secondSurface,
+          validationWindow.getBounds(),
+          secondDesktopImage,
+          validationArea
+        ).toFixed(4));
+        if (secondSurfaceMatchRatio < 0.8) {
+          throw new Error(`Controlled validation surface was not visible in the second runtime compositor frame (${secondSurfaceMatchRatio}).`);
+        }
+        fs.mkdirSync(path.dirname(runtimeOutput2), { recursive: true });
+        fs.writeFileSync(runtimeOutput2, second);
+        const secondCharacters = await captureRuntimeCharacterEvidence(secondDesktopImage, secondSurface, validationArea);
+        evidence.push({
+          ...runtimeEvidenceEntry('normal-live-2', runtimeOutput2, second, manifestOutput),
+          surfaceMatchRatio: secondSurfaceMatchRatio,
+          characters: secondCharacters
+        });
+        if (!engine.paused) engine.togglePause();
+        broadcastPauseState();
+        await showValidationSurface(validationArea, 'NORMAL MODE · PAUSED');
+        await waitForPerformance(200);
+        const paused = await Promise.race([
+          captureDesktopWithPets(display, validationArea),
+          new Promise((_resolve, reject) => setTimeout(() => reject(new Error('Paused desktop capture timed out.')), 3000))
+        ]);
+        const pausedSurface = await validationWindow.webContents.capturePage();
+        const pausedDesktopImage = nativeImage.createFromBuffer(paused);
+        const pausedSurfaceMatchRatio = Number(desktopSurfaceMatchRatio(
+          pausedSurface,
+          validationWindow.getBounds(),
+          pausedDesktopImage,
+          validationArea
+        ).toFixed(4));
+        if (pausedSurfaceMatchRatio < 0.8) {
+          throw new Error(`Controlled validation surface was not visible in the paused runtime compositor frame (${pausedSurfaceMatchRatio}).`);
+        }
+        fs.mkdirSync(path.dirname(runtimePausedOutput), { recursive: true });
+        fs.writeFileSync(runtimePausedOutput, paused);
+        const pausedCharacters = await captureRuntimeCharacterEvidence(pausedDesktopImage, pausedSurface, validationArea);
+        evidence.push({
+          ...runtimeEvidenceEntry('normal-paused', runtimePausedOutput, paused, manifestOutput),
+          surfaceMatchRatio: pausedSurfaceMatchRatio,
+          paused: true,
+          characters: pausedCharacters
+        });
+      }
+      stageSmokeLayout();
+      await waitForPerformance(200);
+      const technical = await Promise.race([
+        capturePetWindowComposition(display.workArea),
         new Promise((_resolve, reject) => setTimeout(() => reject(new Error('capturePage timed out.')), 3000))
       ]);
-      fs.mkdirSync(path.dirname(output), { recursive: true });
-      fs.writeFileSync(output, image.toPNG());
+      fs.mkdirSync(path.dirname(technicalOutput), { recursive: true });
+      fs.writeFileSync(technicalOutput, technical.bytes);
+      if (manifestOutput) {
+        evidence.push({
+          ...runtimeEvidenceEntry('technical-window-count', technicalOutput, technical.bytes, manifestOutput),
+          characters: technical.characters
+        });
+        fs.mkdirSync(path.dirname(manifestOutput), { recursive: true });
+        fs.writeFileSync(manifestOutput, `${JSON.stringify({
+          schemaVersion: 1,
+          capturedAt: new Date().toISOString(),
+          display: {
+            id: String(display.id),
+            width: display.size.width,
+            height: display.size.height,
+            scaleFactor: display.scaleFactor
+          },
+          captureArea: {
+            x: validationArea.x - display.bounds.x,
+            y: validationArea.y - display.bounds.y,
+            width: validationArea.width,
+            height: validationArea.height
+          },
+          surface: {
+            kind: 'controlled-validation',
+            containsUserDesktopContent: false
+          },
+          expectedCharacterIds: engine.pets.map((pet) => pet.id),
+          evidence
+        }, null, 2)}\n`, 'utf8');
+      }
     } catch (error) {
-      fs.mkdirSync(path.dirname(output), { recursive: true });
-      fs.writeFileSync(path.join(path.dirname(output), 'runtime-smoke-error.txt'), `${publicErrorMessage(error)}\n`, 'utf8');
+      fs.mkdirSync(path.dirname(technicalOutput), { recursive: true });
+      fs.writeFileSync(path.join(path.dirname(technicalOutput), 'runtime-smoke-error.txt'), `${publicErrorMessage(error)}\n`, 'utf8');
     } finally {
       finish();
     }
@@ -1188,6 +1961,9 @@ if (!app.requestSingleInstanceLock()) app.quit();
 app.whenReady().then(() => {
   denySessionPermissions(session.defaultSession);
   if (process.platform === 'win32') app.setAppUserModelId(config.app.id);
+  nativeWindowUpdateGate = createNativeWindowUpdateGate(powerMonitor, () => {
+    for (const entry of petWindows.values()) entry.lastBounds = null;
+  });
   engine = new BehaviorEngine({ config, behaviors, manifest, displays: displays() });
   startPerformanceAudit();
   installIpc();

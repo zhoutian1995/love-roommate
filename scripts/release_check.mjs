@@ -53,8 +53,25 @@ else {
   );
 }
 run('Security hardening tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'security-hardening.test.mjs'), path.join(skillRoot, 'scripts', 'tests', 'runtime-security.test.mjs')]);
-run('Template unit tests', process.execPath, ['--test', path.join(skillRoot, 'assets', 'electron-template', 'tests', 'behavior-engine.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'performance-v2.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'performance-audit.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'config.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'security.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'scenario-capture.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'window-size-regression.test.mjs')]);
-run('Release policy tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'release-policy.test.mjs'), path.join(skillRoot, 'scripts', 'tests', 'performance-gate.test.mjs'), path.join(skillRoot, 'scripts', 'tests', 'utf8-integrity.test.mjs')]);
+run('Portrait chroma and transparency recovery tests', process.execPath, ['--test',
+  path.join(skillRoot, 'scripts', 'tests', 'portrait-chroma.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'repair-transparency-cli.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'transparency-repair.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'transparency-repair-security.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'mask-editor-contract.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'transparency-retry.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'trusted-corrected-processing.test.mjs')
+]);
+run('Template unit tests', process.execPath, ['--test', path.join(skillRoot, 'assets', 'electron-template', 'tests', 'behavior-engine.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'performance-v2.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'performance-audit.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'config.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'security.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'scenario-capture.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'window-size-regression.test.mjs'), path.join(skillRoot, 'assets', 'electron-template', 'tests', 'validate-project.test.mjs')]);
+run('Release policy tests', process.execPath, ['--test',
+  path.join(skillRoot, 'scripts', 'tests', 'release-policy.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'action-contract.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'scenario-sequence-evidence.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'performance-gate.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'performance-contract-v4.test.mjs'),
+  path.join(skillRoot, 'scripts', 'tests', 'utf8-integrity.test.mjs')
+]);
+run('macOS Electron runtime layout tests', process.execPath, ['--test', path.join(skillRoot, 'scripts', 'tests', 'macos-electron-runtime.test.mjs')]);
 for (const issue of auditTextFilesForSensitivePaths(skillRoot, new Set(['.json', '.md', '.yaml', '.yml', '.txt']))) {
   failures.push(`${issue.file} contains absolute/private path text.`);
 }

@@ -43,7 +43,7 @@ function fixture() {
 
 const SHOUT_ORDER = ['person-1', 'person-2', 'person-4', 'person-5'];
 const EXCLUDED_IDS = ['person-3'];
-const SHOUT_SPEED = 180;
+const SHOUT_SPEED = behaviorsBase.motion.maxSpeed;
 const FRAME_DT = 1 / 60;
 
 function stageScatteredPositions(engine) {
@@ -68,6 +68,14 @@ function advance(engine, seconds) {
   const frames = Math.ceil(seconds / FRAME_DT);
   for (let index = 0; index < frames; index += 1) engine.update(FRAME_DT, { x: 800, y: 400 });
   return engine.snapshot();
+}
+
+function advanceUntil(engine, predicate, cursor, maxFrames = 3600) {
+  for (let frame = 0; frame < maxFrames; frame += 1) {
+    const snapshot = engine.update(FRAME_DT, typeof cursor === 'function' ? cursor() : cursor);
+    if (predicate(snapshot, engine)) return snapshot;
+  }
+  assert.fail('timed out waiting for runtime behavior');
 }
 
 function assertGradualKneelingShout(trigger, phrase) {
@@ -159,15 +167,22 @@ function assertGradualKneelingShout(trigger, phrase) {
 
 test('centipede follows the cursor without breaking mouth-to-rear connections', () => {
   const engine = fixture();
+  engine.config.selection.userCharacterId = null;
   engine.toggleCentipede({ x: 800, y: 400 });
-  const positions = engine.pets.map(({ x, y }) => ({ x, y }));
-  engine.update(1, { x: 100, y: 100 });
-  const movedX = engine.pets[0].x - positions[0].x;
-  const movedY = engine.pets[0].y - positions[0].y;
-  assert.ok(Math.hypot(movedX, movedY) >= 40);
-  engine.pets.forEach((pet, index) => {
-    assert.ok(Math.abs((pet.x - positions[index].x) - movedX) < 0.01);
-    assert.ok(Math.abs((pet.y - positions[index].y) - movedY) < 0.01);
+  advanceUntil(engine, () => !engine.formationTransition, { x: 800, y: 400 });
+  const leader = engine.pets[0];
+  const before = { x: leader.x, y: leader.y };
+  const size = engine.config.render.spriteSize;
+  const rightHead = engine.anchorsFor(leader, 'right').head;
+  const leftHead = engine.anchorsFor(leader, 'left').head;
+  const cursor = {
+    x: leader.x + (rightHead[0] + leftHead[0]) / 2 * size + 360,
+    y: leader.y + (rightHead[1] + leftHead[1]) / 2 * size
+  };
+  for (let frame = 0; frame < 120; frame += 1) engine.update(FRAME_DT, cursor);
+
+  assert.ok(Math.hypot(leader.x - before.x, leader.y - before.y) >= 40, 'leader must visibly follow the cursor');
+  engine.pets.forEach((pet) => {
     assert.ok(pet.x >= 0 && pet.x <= 1488);
     assert.ok(pet.y >= 0 && pet.y <= 788);
   });
@@ -178,27 +193,30 @@ test('centipede follows the cursor without breaking mouth-to-rear connections', 
   }
 });
 
-test('relay follows the cursor and promotes each eater to the next poop source', () => {
+test('poop chase keeps self as the only source while every other person eats', () => {
   const engine = fixture();
-  engine.togglePoopChase({ x: 800, y: 400 });
-  const positions = engine.pets.map(({ x, y }) => ({ x, y }));
-  engine.update(0.25, { x: 100, y: 100 });
   const leader = engine.pets.find((pet) => pet.id === 'person-3');
-  const leaderIndex = engine.pets.findIndex((pet) => pet.id === 'person-3');
-  const movedX = leader.x - positions[leaderIndex].x;
-  const movedY = leader.y - positions[leaderIndex].y;
-  assert.ok(Math.hypot(movedX, movedY) >= 40);
-  engine.pets.forEach((pet, index) => {
-    assert.ok(Math.abs((pet.x - positions[index].x) - movedX) < 0.01);
-    assert.ok(Math.abs((pet.y - positions[index].y) - movedY) < 0.01);
-  });
-  assert.equal(engine.droppings[0].sourceId, 'person-3');
-  assert.equal(engine.droppings[0].approachedTarget, true);
-  engine.update(0.65, { x: 100, y: 100 });
-  engine.update(0.42, { x: 100, y: 100 });
-  assert.equal(engine.droppings[0].sourceId, 'person-1');
-  const nextSource = engine.pets.find((pet) => pet.id === 'person-1');
-  assert.equal(nextSource.action, `poop_${nextSource.direction}`);
+  const cursor = () => ({ x: leader.x + 360, y: leader.y + engine.config.render.spriteSize / 2 });
+  engine.togglePoopChase(cursor());
+  advanceUntil(engine, () => !engine.formationTransition, cursor);
+  const expectedTargets = ['person-1', 'person-2', 'person-4', 'person-5'];
+  const droppingId = engine.droppings[0].id;
+
+  for (let index = 0; index < expectedTargets.length; index += 1) {
+    const expectedTarget = expectedTargets[index];
+    assert.equal(engine.droppings.length, 1);
+    assert.equal(engine.droppings[0].sourceId, 'person-3');
+    assert.equal(engine.droppings[0].targetId, expectedTarget);
+    advanceUntil(engine, (snapshot) => snapshot.droppings[0]?.eatenBy.length >= index + 1, cursor);
+    assert.equal(engine.droppings[0].id, droppingId);
+    assert.deepEqual(engine.droppings[0].eatenBy, expectedTargets.slice(0, index + 1));
+    if (index < expectedTargets.length - 1) {
+      advanceUntil(engine, () => engine.poopRelay.targetIndex === index + 2 && engine.droppings[0]?.targetId === expectedTargets[index + 1], cursor);
+    }
+  }
+
+  assert.ok(engine.droppings.every((dropping) => dropping.sourceId === 'person-3'));
+  assert.ok(engine.pets.filter((pet) => pet.id !== 'person-3').every((pet) => !pet.action.startsWith('poop_')));
 });
 
 test('dad gathers only eligible people gradually, kneels, then shouts three frames', () => {
@@ -209,21 +227,19 @@ test('grandpa gathers only eligible people gradually, kneels, then shouts three 
   assertGradualKneelingShout((engine) => engine.callGrandpa(), behaviorsBase.phrases.grandpa);
 });
 
-test('dad and grandpa safely skip when every character is prank-excluded', () => {
+test('legacy prank exclusions cannot spare anyone except the selected self', () => {
   for (const trigger of [(engine) => engine.callDad(), (engine) => engine.callGrandpa()]) {
     const engine = fixture();
     engine.config.selection.prankExcludedCharacterIds = engine.pets.map((pet) => pet.id);
-    const before = engine.snapshot();
     const result = trigger(engine);
     assert.deepEqual(result, {
-      started: false,
+      started: true,
       recipientId: 'person-3',
-      participantIds: [],
-      excludedIds: engine.pets.map((pet) => pet.id),
-      skippedReason: 'no-eligible-participants'
+      participantIds: SHOUT_ORDER,
+      excludedIds: EXCLUDED_IDS,
+      skippedReason: null
     });
-    assert.equal(engine.mode, before.mode);
-    assert.equal(engine.snapshot().shoutPhase, null);
-    assert.deepEqual(engine.snapshot().pets, before.pets);
+    assert.equal(engine.mode, 'shout');
+    assert.equal(engine.snapshot().shoutPhase, 'forming');
   }
 });

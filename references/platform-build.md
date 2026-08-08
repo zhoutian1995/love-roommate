@@ -12,9 +12,10 @@
 
 - Supported target: macOS 13+ on Apple silicon.
 - Use the pinned Electron runtime downloaded automatically by the Skill and package it directly on an Apple-silicon Mac.
-- Deliver an unsigned `.app` under `release/macos/`.
-- Do not claim signing, notarization, DMG, Intel support, or App Store readiness.
-- Locally built apps normally avoid download quarantine. If an unsigned copied app is blocked, tell the user to use Finder's **Open** command or the Privacy & Security panel; do not disable Gatekeeper globally.
+- After installing app resources and updating `Info.plist`, ad-hoc sign the complete `.app` and require `codesign --verify --deep --strict` to pass before reporting packaging success.
+- Deliver the locally ad-hoc-signed `.app` under `release/macos/`.
+- Do not claim Developer ID signing, notarization, DMG, Intel support, App Store readiness, or general Gatekeeper acceptance.
+- Locally built apps normally avoid download quarantine. If a copied app is blocked, tell the user to use Finder's **Open** command or the Privacy & Security panel; do not disable Gatekeeper globally.
 
 ## Cross-platform rule
 
@@ -26,8 +27,8 @@ Never treat a Windows-produced macOS directory as a verified `.app`. Preserve th
 - Choose the display containing the cursor when a special performance begins, keep the fixed-row shape inside that display's work area, and move the whole formation toward the cursor.
 - Keep the decorative poop cursor, dropped poop, and stink effects permanently click-through.
 - Right-click the visible character to open recovery controls; clicks outside opaque pixels must reach the underlying app.
-- Verify poop relay and ordinary centipede are mutually exclusive, pause freezes both people and the current dropping, and exiting relay mode hides the persistent dropped-effect window.
-- Verify every human-centipede mouth touches the previous rear. Verify relay keeps exactly one dropping and every eater becomes the next poop source only after eating finishes.
-- Verify dad and grandpa reports distinguish `recipientId`, `participantIds`, `excludedIds`, and `skippedReason`. When present, the recipient must move at the configured speed to the row center axis, stand in front without overlap, remain idle, and show no prank bubble. Eligible participants must face the recipient, form one kneeling row, play three synchronized shout beats, and return to free mode. Additional exclusions remain spectators; a fully excluded participant set must be a safe no-op even when a recipient exists.
+- Verify group shout and poop chase are mutually exclusive, Pause freezes both people and the current poop effect, and leaving a prank hides its effect windows.
+- With self present, verify self remains visibly in front as the only poop source, exactly one dropping is readable, every other character chases and eats in repeating photo-number order, and eaters never become poop sources. With no self selected, verify the click-through cursor poop follows the real pointer and every human-centipede mouth touches the previous rear while the full connected chain chases it.
+- Verify dad and grandpa reports distinguish `recipientId`, `participantIds`, `excludedIds`, and `skippedReason`. When self is present, that recipient moves at the configured speed to the formation center axis, stands in front without overlap, remains idle, and shows no prank bubble while every other character kneels and shouts. When self is absent, `recipientId` is null and every photographed character kneels and shouts; do not create spectators or extra exclusions.
 - Use tray Pause and Quit as recovery controls.
 - On centipede exit, show only the configured grandpa phrase when `exitShout` is enabled.

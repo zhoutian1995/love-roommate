@@ -13,6 +13,7 @@ let interactive = false;
 let dragging = false;
 let suppressContextMenuUntil = 0;
 const hitSlopPx = 6;
+document.body.dataset.spriteReady = 'false';
 
 window.petApi.onPaused((paused) => document.documentElement.classList.toggle('paused', Boolean(paused)));
 window.petApi.onPresentRequest(() => {
@@ -36,17 +37,34 @@ function redrawHitCanvas() {
   context.drawImage(sprite, 0, 0, canvas.width, canvas.height);
 }
 
+function shoutText(state) {
+  const phrase = String(state.phrase || '');
+  if (state.action !== 'shout' || !phrase) return phrase;
+  const base = phrase.replace(/[!！…]+$/u, '');
+  const frame = Math.max(0, Math.min(2, Math.floor(state.frame || 0)));
+  return frame === 0 ? `${base}...` : frame === 1 ? `${base}!!` : `${base}!!!`;
+}
+
 function updateState(state) {
   currentState = state;
   const path = chooseFrame(state);
   if (path !== currentFramePath) {
     currentFramePath = path;
+    document.body.dataset.spriteReady = 'false';
     sprite.src = assetUrl(`sprites/${path}`);
     sprite.classList.toggle('placeholder-left', path.endsWith('placeholder.svg') && state.direction === 'left');
   }
-  bubble.textContent = state.phrase || '';
+  bubble.textContent = shoutText(state);
   bubble.classList.toggle('visible', Boolean(state.phrase));
   document.documentElement.style.setProperty('--effect-size', `${state.effectSize || bootstrap.config.render.effectSize}px`);
+  document.body.dataset.effect = state.effect || '';
+  document.body.dataset.direction = state.direction;
+  document.body.dataset.action = state.action || '';
+  document.body.dataset.shoutRecipient = String(Boolean(state.shoutRecipient));
+  document.body.dataset.shoutFrame = String(Math.max(0, Math.min(2, Math.floor(state.frame || 0))));
+  document.body.dataset.phraseKind = String(state.phrase || '').startsWith('爷爷')
+    ? 'grandpa'
+    : String(state.phrase || '').startsWith('爸爸') ? 'dad' : '';
   if (state.effect) {
     effect.src = assetUrl(`effects/${state.effect}.svg`);
     effect.classList.add('visible');
@@ -81,7 +99,13 @@ function setInteractive(next) {
   window.petApi.setInteractive(next);
 }
 
-sprite.addEventListener('load', redrawHitCanvas);
+sprite.addEventListener('load', () => {
+  document.body.dataset.spriteReady = 'true';
+  redrawHitCanvas();
+});
+sprite.addEventListener('error', () => {
+  document.body.dataset.spriteReady = 'false';
+});
 window.addEventListener('mousemove', (event) => setInteractive(dragging || isOpaqueAt(event.clientX, event.clientY)));
 window.addEventListener('mouseleave', () => setInteractive(dragging));
 window.addEventListener('blur', () => {
@@ -125,5 +149,6 @@ window.addEventListener('contextmenu', (event) => {
   document.documentElement.style.setProperty('--sprite-size', `${bootstrap.config.render.spriteSize}px`);
   document.documentElement.style.setProperty('--effect-size', `${bootstrap.config.render.effectSize}px`);
   document.documentElement.style.setProperty('--hue-rotate', `${bootstrap.character.hueRotate || 0}deg`);
+  if (bootstrap.state) updateState(bootstrap.state);
   window.petApi.onState(updateState);
 })();

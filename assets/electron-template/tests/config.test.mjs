@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const config = JSON.parse(fs.readFileSync(path.join(root, 'src/config/pet.config.json'), 'utf8'));
 const behaviors = JSON.parse(fs.readFileSync(path.join(root, 'src/config/behaviors.json'), 'utf8'));
@@ -29,7 +31,8 @@ test('public configuration stays inside v1 contract', () => {
   assert.equal(behaviors.schemaVersion, 1);
   assert.equal(manifest.schemaVersion, 1);
   assert.ok(config.characters.length >= 1 && config.characters.length <= 8);
-  assert.ok(['normal', 'centipede', 'poop-relay', 'all'].includes(config.selection.mode));
+  assert.ok(['normal', 'group-shout', 'poop-chase', 'all'].includes(config.selection.mode));
+  assert.ok([null, 'self-poop', 'cursor-centipede'].includes(config.selection.chaseVariant));
   const ids = config.characters.map((character) => character.id);
   assert.ok(config.selection.userCharacterId === null || ids.includes(config.selection.userCharacterId));
   assert.ok(Array.isArray(config.selection.prankExcludedCharacterIds));
@@ -44,17 +47,68 @@ test('public configuration stays inside v1 contract', () => {
   assert.ok(config.render.spriteSize >= 72 && config.render.spriteSize <= 160);
   assert.ok(config.render.effectSize >= 16 && config.render.effectSize <= 48);
   assert.equal(behaviors.hotkeys.poopChase, 'CommandOrControl+Alt+E');
+  assert.equal(typeof behaviors.hotkeys.chase, 'string');
+  assert.equal(behaviors.hotkeys.pauseFallback, 'CommandOrControl+Shift+Alt+P');
+  assert.notEqual(behaviors.hotkeys.pauseFallback, behaviors.hotkeys.pause);
   assert.equal(typeof behaviors.poopChase.enabled, 'boolean');
   assert.equal(behaviors.poopChase.maxDroppings, 1);
   assert.ok(behaviors.poopChase.dropVisibleBeforeEatMs >= 0);
   assert.ok(behaviors.poopChase.roundResetDelayMs >= 0);
-  assert.equal(behaviors.poopChase.enabled, ['poop-relay', 'all'].includes(config.selection.mode));
-  assert.equal(behaviors.centipede.enabled, ['centipede', 'all'].includes(config.selection.mode));
+  assert.equal(behaviors.groupShout.enabled, ['group-shout', 'all'].includes(config.selection.mode));
+  assert.equal(behaviors.poopChase.enabled, config.selection.chaseVariant === 'self-poop');
+  assert.equal(behaviors.centipede.enabled, config.selection.chaseVariant === 'cursor-centipede');
+});
+
+test('pause shortcut registration uses a distinct fallback only when the primary key is unavailable', () => {
+  const helperPath = path.join(root, 'src/shortcut-registration.js');
+  assert.ok(fs.existsSync(helperPath), 'runtime shortcut fallback helper is missing');
+  const { registerShortcutWithFallback } = require(helperPath);
+
+  const primaryCalls = [];
+  const primary = registerShortcutWithFallback({
+    primary: 'Primary',
+    fallback: 'Fallback',
+    callback() {},
+    register(accelerator) {
+      primaryCalls.push(accelerator);
+      return true;
+    },
+    warn() { assert.fail('a successful primary registration must not warn'); }
+  });
+  assert.equal(primary, 'Primary');
+  assert.deepEqual(primaryCalls, ['Primary']);
+
+  const fallbackCalls = [];
+  const warnings = [];
+  const fallback = registerShortcutWithFallback({
+    primary: 'Primary',
+    fallback: 'Fallback',
+    callback() {},
+    register(accelerator) {
+      fallbackCalls.push(accelerator);
+      return accelerator === 'Fallback';
+    },
+    warn(message) { warnings.push(message); }
+  });
+  assert.equal(fallback, 'Fallback');
+  assert.deepEqual(fallbackCalls, ['Primary', 'Fallback']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Primary/);
+  assert.match(warnings[0], /Fallback/);
+
+  assert.throws(() => registerShortcutWithFallback({
+    primary: 'Same',
+    fallback: 'Same',
+    callback() {},
+    register() { return false; },
+    warn() {}
+  }), /distinct/i);
 });
 
 test('runtime manifest exposes one shout group without unused kneel action keys', () => {
   for (const character of manifest.characters) {
-    assert.ok(Array.isArray(character.frames.shout) && character.frames.shout.length > 0);
+    const participates = behaviors.groupShout.enabled && character.id !== config.selection.userCharacterId;
+    if (participates) assert.ok(Array.isArray(character.frames.shout) && character.frames.shout.length > 0);
     assert.equal(character.frames.kneel_shout_1, undefined);
     assert.equal(character.frames.kneel_shout_2, undefined);
     assert.equal(character.frames.kneel_shout_3, undefined);
@@ -62,9 +116,12 @@ test('runtime manifest exposes one shout group without unused kneel action keys'
 });
 
 test('group shout configuration cannot select a random single dad', () => {
+  assert.equal(behaviors.randomDad.enabled, false, 'automatic dad interruptions must be opt-in');
   assert.equal(behaviors.randomDad.groupChance, undefined);
   assert.equal(behaviors.randomDad.durationMs, undefined);
-  assert.equal(behaviors.groupShout.gatherSpeed, 180);
+  assert.equal(behaviors.groupShout.gatherSpeed, 110);
+  assert.ok(behaviors.motion.maxSpeed <= 120, 'shared visible movement must stay deliberately slow');
+  assert.ok(behaviors.motion.maxAcceleration <= 220, 'visible mode switches must cap acceleration');
   assert.ok(behaviors.groupShout.kneelDelayMs >= 300);
   assert.equal(behaviors.groupShout.frameDurationMs, 1400);
 });
@@ -95,6 +152,9 @@ test('Electron performance harness records process, memory, frame, and event-loo
   assert.match(mainSource, /monitorEventLoopDelay/);
   assert.match(mainSource, /runtimeFingerprintForProject/);
   assert.match(mainSource, /pauseComparison/);
+  assert.match(mainSource, /runEnabledPerformancePhase/);
+  assert.match(mainSource, /settings\.enabled = true/);
+  assert.match(mainSource, /settings\.enabled = wasEnabled/);
   assert.doesNotMatch(mainSource, /\n\+\nfunction performanceDuration/);
 });
 

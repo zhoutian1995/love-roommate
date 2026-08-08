@@ -92,6 +92,10 @@ if (process.platform === 'win32' && process.arch === 'x64') {
     const result = spawnSync('/usr/bin/plutil', ['-replace', key, '-string', value, plist], { stdio: 'inherit' });
     if (result.status !== 0) throw new Error(`Could not update ${key} in ${plist}`);
   }
+  const signResult = spawnSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', output], { stdio: 'inherit' });
+  if (signResult.status !== 0) throw new Error(`Could not ad-hoc sign ${output}`);
+  const verifyResult = spawnSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', output], { stdio: 'inherit' });
+  if (verifyResult.status !== 0) throw new Error(`Could not verify the ad-hoc signature for ${output}`);
   console.log(JSON.stringify({ platform: 'macos', output: relativeOutput(output), executable: relativeOutput(executable) }, null, 2));
 } else {
   console.error(`Unsupported package host: ${process.platform}/${process.arch}. Use Windows x64 or Apple-silicon macOS.`);

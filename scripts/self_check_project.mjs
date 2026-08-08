@@ -2,13 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { applyCodexRuntimeArgs, fail, loadSharp, parseArgs, readJson, writeJson } from './lib/common.mjs';
+import { actionFrameDescriptor, compareActionContract, deriveActionContract } from './lib/action-contract.mjs';
 import { alphaBounds, nearestVisibleAlphaDistance } from './lib/sprite-processing.mjs';
+import { isSupportedGeneratedAttestation } from './lib/generation-attestation.mjs';
 import { portableRelative, sanitizePersistedValue } from './lib/privacy.mjs';
+import { validateCorrectionLineage } from './lib/transparency-retry.mjs';
+import { validatePreviewProvenance } from './lib/preview-provenance.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 applyCodexRuntimeArgs(args);
 if (!args.project) {
-  fail('Usage: node self_check_project.mjs --project <project> [--preview <preview-dir>] [--runtime <runtime-window.png>] [--review <self-check-review.json>] [--min-score 85] [--warn-only]');
+  fail('Usage: node self_check_project.mjs --project <project> [--preview <preview-dir>] [--runtime <runtime-window.png>] [--review <self-check-review.json>] [--min-score 90] [--warn-only]');
 }
 
 const project = path.resolve(args.project);
@@ -50,6 +54,10 @@ const runtimePath = args.runtime
   : fs.existsSync(path.join(preview, 'runtime-window.png'))
     ? path.join(preview, 'runtime-window.png')
     : null;
+const runtimeSecondPath = path.join(preview, 'runtime-window-2.png');
+const runtimePausedPath = path.join(preview, 'runtime-paused.png');
+const runtimeTechnicalPath = path.join(preview, 'runtime-smoke-technical.png');
+const runtimeEvidenceManifestPath = path.join(preview, 'runtime-evidence-manifest.json');
 const reviewPath = args.review ? path.resolve(args.review) : defaultReviewPath;
 let runtimeRelative = null;
 let reviewRelative;
@@ -71,10 +79,11 @@ const identityQualityPath = path.join(preview, 'identity-quality-review.json');
 const scenarioRoot = path.join(preview, 'scenarios');
 const poopChase = behaviors.poopChase || {};
 const poopFollowers = Array.isArray(poopChase.followerIds) ? poopChase.followerIds : [];
+const actionContract = deriveActionContract(config);
 
 function requiredCharacterChecks(characterId) {
   const checks = ['identityConsistency', 'clothingSeparation', 'actionReadability', 'bodyCompleteness', 'edgeQuality'];
-  if (poopChase.enabled && (characterId === poopChase.leaderId || poopFollowers.includes(characterId))) {
+  if (actionContract.rolesByCharacter[characterId]?.chaseRole) {
     checks.push('roleActionReadability');
   }
   return checks;
@@ -159,6 +168,31 @@ function scenarioEvidenceFiles(root) {
   return files.sort((left, right) => left.localeCompare(right));
 }
 
+function releaseEligibleScenarioEvidencePaths(root) {
+  if (!fs.existsSync(root)) return [];
+  const references = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const scenarioDirectory = path.join(root, entry.name);
+    const reportPath = path.join(scenarioDirectory, 'report.json');
+    if (!fs.existsSync(reportPath)) continue;
+    let report;
+    try {
+      report = readJson(reportPath);
+    } catch {
+      continue;
+    }
+    for (const capture of Array.isArray(report.captures) ? report.captures : []) {
+      if (capture?.captureKind !== 'desktop-compositor' || capture?.releaseEligible !== true || typeof capture?.composition !== 'string') continue;
+      const composition = path.resolve(scenarioDirectory, capture.composition);
+      const relativeToScenario = path.relative(scenarioDirectory, composition);
+      if (!relativeToScenario || relativeToScenario.startsWith('..') || path.isAbsolute(relativeToScenario) || !fs.existsSync(composition)) continue;
+      references.push(portableRelative(outputRoot, composition));
+    }
+  }
+  return [...new Set(references)].sort((left, right) => left.localeCompare(right));
+}
+
 async function validateGenerationManifest() {
   if (!fs.existsSync(generationManifestPath)) return null;
   const data = readJson(generationManifestPath);
@@ -170,15 +204,24 @@ async function validateGenerationManifest() {
     policy.evidenceLevel !== 'workflow-attested' ||
     !Array.isArray(data.assets)
   ) {
-    addIssue('error', 'generation-manifest-schema', 'The generation manifest does not satisfy the GPT Image 2 workflow-attestation policy.', 'Regenerate the manifest and record the final artwork with record_image_generation.mjs.', {}, 25);
+    addIssue('error', 'generation-manifest-schema', 'The generation manifest does not satisfy the supported image-generation workflow policy.', 'Regenerate the manifest and record the final artwork with record_image_generation.mjs.', {}, 25);
     return data;
   }
   const required = [{ kind: 'identity', characterId: null, role: null }];
-  const actionNames = [
+  const commonActionNames = [
     'crawl_right_1', 'crawl_right_2', 'crawl_left_1', 'crawl_left_2',
-    'idle_right', 'idle_left', 'centipede_right', 'centipede_left',
-    'kneel_shout_1', 'kneel_shout_2', 'kneel_shout_3', 'drag',
-    'poop_right', 'poop_left', 'eat_right', 'eat_left'
+    'idle_right', 'idle_left', 'drag'
+  ];
+  const groupShoutActionNames = ['kneel_shout_1', 'kneel_shout_2', 'kneel_shout_3'];
+  const centipedeActionNames = ['centipede_right', 'centipede_left'];
+  const poopActionNames = ['poop_right', 'poop_left'];
+  const eatActionNames = ['eat_right', 'eat_left'];
+  const actionNames = [
+    ...commonActionNames,
+    ...groupShoutActionNames,
+    ...centipedeActionNames,
+    ...poopActionNames,
+    ...eatActionNames
   ];
   const allowedActions = new Set(actionNames);
   const horizontalFlipPairs = new Map([
@@ -201,9 +244,86 @@ async function validateGenerationManifest() {
       addIssue('error', 'missing-action-origin', `Generation manifest action ${entry.action} has no valid origin.`, 'Record the action again as generated or derived.', { action: entry.action }, 20);
     }
   }
+  for (const entry of [...history, ...data.assets]) {
+    const origin = data.schemaVersion === 2 ? 'generated' : (entry.origin || 'generated');
+    if (origin === 'generated' && !isSupportedGeneratedAttestation(entry)) {
+      addIssue(
+        'error',
+        'invalid-image-generation-attestation',
+        `${entry.key || entry.file || 'unknown asset'} has an incomplete or unsupported image-generation workflow attestation.`,
+        'Record the asset again with a supported image-generation workflow.',
+        { asset: entry.key || null, file: entry.file || null },
+        25
+      );
+    }
+    if (origin === 'derived' && (
+      entry.generator || entry.declaredModelPolicy || entry.evidenceLevel || entry.promptVersion ||
+      entry.generationMode || entry.fallbackAuthorization || entry.fallbackReason
+    )) {
+      addIssue(
+        'error',
+        'mixed-derived-attestation',
+        `${entry.key || entry.file || 'unknown asset'} mixes derived lineage with native generation attestation.`,
+        'Record the derived action without native generation fields.',
+        { asset: entry.key || null, file: entry.file || null },
+        25
+      );
+    }
+    const correctionErrors = validateCorrectionLineage(outputRoot, entry);
+    if (correctionErrors.length) {
+      addIssue(
+        'error',
+        'invalid-transparency-correction-lineage',
+        `Transparency correction lineage is invalid for ${entry.key || entry.file || 'unknown asset'}: ${correctionErrors.join(' ')}`,
+        'Restore the original correction report and all four hashed files, or record a new versioned correction without overwriting prior evidence.',
+        { asset: entry.key || null, file: entry.file || null },
+        25
+      );
+    }
+  }
+  for (const entry of history) {
+    let historyFile;
+    try {
+      historyFile = path.resolve(outputRoot, entry.file || '');
+      const relative = portableRelative(outputRoot, historyFile, 'Generation history source');
+      if (!relative.startsWith('preview/')) throw new Error('Generation history source must remain inside preview/.');
+    } catch {
+      addIssue(
+        'error',
+        'missing-generation-history-source',
+        `The recorded replacement history source path is unsafe for ${entry.key || entry.file || 'unknown asset'}.`,
+        'Restore the superseded source inside preview/ and record the replacement chain again.',
+        { asset: entry.key || null, file: entry.file || null },
+        25
+      );
+      continue;
+    }
+    if (!fs.existsSync(historyFile) || !fs.statSync(historyFile).isFile()) {
+      addIssue(
+        'error',
+        'missing-generation-history-source',
+        `The superseded generation source is missing for ${entry.key || entry.file || 'unknown asset'}.`,
+        'Restore the exact superseded source file so the replacement history remains independently auditable.',
+        { asset: entry.key || null, file: entry.file || null },
+        25
+      );
+      continue;
+    }
+    if (fileHash(historyFile) !== entry.sha256) {
+      addIssue(
+        'error',
+        'stale-generation-history-attestation',
+        `The superseded generation source changed after attestation for ${entry.key || entry.file || 'unknown asset'}.`,
+        'Restore the exact superseded source file or record a new valid replacement chain without overwriting evidence.',
+        { asset: entry.key || null, file: entry.file || null },
+        25
+      );
+    }
+  }
   for (const character of config.characters) {
     required.push({ kind: 'master', characterId: character.id, role: null, action: null });
-    for (const action of actionNames) required.push({ kind: 'action', characterId: character.id, role: null, action });
+    const requiredActions = actionContract.actionsByCharacter[character.id] || [];
+    for (const action of requiredActions) required.push({ kind: 'action', characterId: character.id, role: null, action });
   }
   for (const expected of required) {
     const entry = data.assets.find((item) =>
@@ -214,21 +334,10 @@ async function validateGenerationManifest() {
     );
     const label = [expected.kind, expected.characterId, expected.role, expected.action].filter(Boolean).join(':');
     if (!entry) {
-      addIssue('error', 'missing-image-generation-attestation', `Missing GPT Image 2 workflow record for ${label}.`, 'Generate the final artwork with Codex image generation and record it with record_image_generation.mjs.', { asset: label }, 20);
+      addIssue('error', 'missing-image-generation-attestation', `Missing supported image-generation workflow record for ${label}.`, 'Generate the final artwork with Codex image generation and record it with record_image_generation.mjs.', { asset: label }, 20);
       continue;
     }
     const origin = data.schemaVersion === 2 ? 'generated' : (entry.origin || 'generated');
-    if (origin === 'generated' && (
-      entry.generator !== 'codex-imagegen' ||
-      entry.declaredModelPolicy !== 'gpt-image-2' ||
-      entry.evidenceLevel !== 'workflow-attested'
-    )) {
-      addIssue('error', 'invalid-image-generation-attestation', `${label} has an incomplete workflow attestation.`, 'Record the current Codex image-generation output again.', { asset: label }, 25);
-      continue;
-    }
-    if (origin === 'derived' && (entry.generator || entry.declaredModelPolicy || entry.evidenceLevel || entry.promptVersion)) {
-      addIssue('error', 'mixed-derived-attestation', `${label} mixes derived lineage with native generation attestation.`, 'Record the derived action without native generation fields.', { asset: label }, 25);
-    }
     if (expected.kind === 'action' && (!entry.masterFingerprint || (origin === 'generated' && !entry.promptVersion) || !Number.isInteger(entry.version))) {
       addIssue('error', 'missing-action-lineage', `${label} is missing master fingerprint or version lineage.`, 'Record the action again with its approved master fingerprint, prompt version, and generation version.', { asset: label }, 20);
     }
@@ -333,12 +442,113 @@ async function validateGenerationManifest() {
       }
     }
   }
+  for (const provenanceIssue of validatePreviewProvenance({ outputRoot, preview, manifest: data })) {
+    addIssue(
+      provenanceIssue.severity,
+      provenanceIssue.code,
+      provenanceIssue.message,
+      'Restore the exact fictional source/board inside preview and record a relative SHA-bound lineage sidecar.',
+      provenanceIssue,
+      25
+    );
+  }
   return data;
 }
 
-function expectedReview(characterFingerprints, runtimeFingerprint) {
+const humorWeights = {
+  roleClarity: 25,
+  absurdity: 20,
+  timingEscalation: 20,
+  formationReadability: 15,
+  poopReadability: 10,
+  surpriseRewatch: 10
+};
+
+const humorContract = {
+  schemaVersion: 1,
+  reviewSchemaVersion: 3,
+  threshold: 90,
+  weights: humorWeights,
+  requiredEntryFields: ['prankId', 'evidenceRefs', ...Object.keys(humorWeights), 'total', 'deductions', 'optimizations', 'reevaluationNotes', 'status'],
+  requiredTextFields: ['deductions', 'optimizations', 'reevaluationNotes'],
+  meaningfulTextMinimum: 4,
+  evidence: {
+    source: 'release-eligible-desktop-compositor-capture',
+    requireImage: true,
+    captureKind: 'desktop-compositor',
+    releaseEligible: true
+  }
+};
+
+function stableSerialize(value) {
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+const humorContractFingerprint = crypto.createHash('sha256').update(stableSerialize(humorContract)).digest('hex');
+
+function expectedHumorPrankIds() {
+  const ids = [];
+  const groupShoutSkipped = config.selection?.groupShoutSkippedReason === 'no-eligible-participants';
+  const chaseSkipped = config.selection?.chaseSkippedReason === 'no-eligible-followers';
+  if (!groupShoutSkipped && (behaviors.groupShout?.enabled || ['group-shout', 'all'].includes(config.selection?.mode))) ids.push('dad-shout', 'grandpa-shout');
+  if (!chaseSkipped && (behaviors.poopChase?.enabled || config.selection?.chaseVariant === 'self-poop')) ids.push('poop-chase');
+  if (!chaseSkipped && (behaviors.centipede?.enabled || config.selection?.chaseVariant === 'cursor-centipede')) ids.push('cursor-centipede');
+  return [...new Set(ids)];
+}
+
+function prankScenarioDirectory(prankId) {
+  return prankId === 'cursor-centipede' ? 'centipede' : prankId;
+}
+
+function prankEvidencePrefix(prankId) {
+  return `preview/scenarios/${prankScenarioDirectory(prankId)}/`;
+}
+
+function defaultPrankEvidenceRefs(prankId, scenarioEvidencePaths) {
+  const prefix = prankEvidencePrefix(prankId);
+  return scenarioEvidencePaths.filter((reference) => {
+    if (!reference.startsWith(prefix) || !reference.toLowerCase().endsWith('.png')) return false;
+    return !reference.slice(prefix.length).includes('/');
+  });
+}
+
+function meaningfulReviewText(value) {
+  if (typeof value !== 'string') return false;
+  const visible = value.normalize('NFKC').replace(/[\s\p{Cf}\p{Cc}]+/gu, '');
+  return visible.length >= humorContract.meaningfulTextMinimum && /[\p{L}\p{N}]/u.test(visible);
+}
+
+function meaningfulReviewList(value) {
+  return Array.isArray(value) && value.length > 0 && value.every(meaningfulReviewText);
+}
+
+function expectedHumorReview(scenarioEvidencePaths) {
+  const prankIds = expectedHumorPrankIds();
+  const required = prankIds.length > 0;
   return {
-    schemaVersion: 1,
+    required,
+    contractFingerprint: humorContractFingerprint,
+    reviews: prankIds.map((prankId) => ({
+      prankId,
+      evidenceRefs: defaultPrankEvidenceRefs(prankId, scenarioEvidencePaths),
+      ...Object.fromEntries(Object.keys(humorWeights).map((key) => [key, null])),
+      total: null,
+      deductions: [],
+      optimizations: [],
+      reevaluationNotes: '',
+      status: 'pending'
+    })),
+    status: required ? 'pending' : 'not-applicable'
+  };
+}
+
+function expectedReview(characterFingerprints, runtimeFingerprint, scenarioEvidencePaths) {
+  return {
+    schemaVersion: humorContract.reviewSchemaVersion,
     reviewedAt: null,
     reviewedAssets: {
       identityBoard: 'identity-board.png',
@@ -363,14 +573,27 @@ function expectedReview(characterFingerprints, runtimeFingerprint) {
       visible: runtimePath ? 'pending' : 'not-applicable',
       framing: runtimePath ? 'pending' : 'not-applicable',
       transparency: runtimePath ? 'pending' : 'not-applicable',
+      humor: expectedHumorReview(scenarioEvidencePaths),
       notes: ''
     },
     overallNotes: ''
   };
 }
 
-function reviewStatus(review, characterFingerprints, runtimeFingerprint) {
-  const result = { provided: Boolean(review), complete: true, failed: false, pending: [] };
+function reviewStatus(review, characterFingerprints, runtimeFingerprint, scenarioEvidencePaths) {
+  const expectedPrankIds = expectedHumorPrankIds();
+  const result = {
+    provided: Boolean(review),
+    complete: true,
+    failed: false,
+    pending: [],
+    humor: {
+      required: expectedPrankIds.length > 0,
+      contractFingerprint: humorContractFingerprint,
+      reviews: [],
+      status: expectedPrankIds.length > 0 ? 'pending' : 'not-applicable'
+    }
+  };
   if (!review) {
     return {
       ...result,
@@ -378,8 +601,8 @@ function reviewStatus(review, characterFingerprints, runtimeFingerprint) {
       pending: config.characters.flatMap((character) => requiredCharacterChecks(character.id).map((check) => `${character.id}:${check}`))
     };
   }
-  if (review.schemaVersion !== 1) {
-    addIssue('error', 'review-schema', 'Manual review must use schemaVersion 1.', 'Regenerate self-check-review.json and review the current assets.', {}, 20);
+  if (review.schemaVersion !== humorContract.reviewSchemaVersion) {
+    addIssue('error', 'review-schema', `Manual review must use schemaVersion ${humorContract.reviewSchemaVersion}.`, 'Regenerate self-check-review.json and review the current assets, including the humor gate.', {}, 20);
     result.failed = true;
   }
   for (const character of config.characters) {
@@ -437,6 +660,122 @@ function reviewStatus(review, characterFingerprints, runtimeFingerprint) {
       }
     }
   }
+  if (result.humor.required) {
+    let humorFailed = false;
+    let humorComplete = true;
+    if (!runtimePath) {
+      result.complete = false;
+      result.pending.push('runtime:humor-evidence');
+      return result;
+    }
+    const humor = review.runtime?.humor;
+    const reviews = Array.isArray(humor?.reviews) ? humor.reviews : [];
+    result.humor = humor && typeof humor === 'object'
+      ? { ...humor, required: true, reviews }
+      : { required: true, contractFingerprint: null, reviews: [], status: 'pending' };
+    if (humor?.contractFingerprint !== humorContractFingerprint) {
+      result.failed = true;
+      humorFailed = true;
+      addIssue(
+        'error',
+        'manual-humor-contract-stale',
+        'The manual humor review uses a stale scoring contract.',
+        'Regenerate self-check-review.json and repeat every enabled prank review under the current weights, threshold, evidence, and required fields.',
+        { expectedContractFingerprint: humorContractFingerprint, reportedContractFingerprint: humor?.contractFingerprint || null },
+        20
+      );
+    }
+    const actualPrankIds = reviews.map((entry) => entry?.prankId);
+    const exactPrankSet = reviews.length === expectedPrankIds.length
+      && new Set(actualPrankIds).size === actualPrankIds.length
+      && expectedPrankIds.every((prankId) => actualPrankIds.includes(prankId));
+    if (!exactPrankSet) {
+      result.failed = true;
+      humorFailed = true;
+      addIssue(
+        'error',
+        'manual-humor-invalid',
+        'The manual humor review does not contain exactly one entry for every enabled special prank.',
+        'Regenerate the review and score dad shout, grandpa shout, and the active poop-chase variant separately.',
+        { expectedPrankIds, actualPrankIds },
+        20
+      );
+    }
+    const scenarioEvidenceSet = new Set(scenarioEvidencePaths);
+    for (const prankId of expectedPrankIds) {
+      const entry = reviews.find((candidate) => candidate?.prankId === prankId);
+      if (!entry) {
+        result.complete = false;
+        humorComplete = false;
+        result.pending.push(`runtime:humor:${prankId}:all`);
+        continue;
+      }
+      const missingScores = Object.keys(humorWeights).filter((key) => !Number.isFinite(entry[key]));
+      if (missingScores.length) {
+        result.complete = false;
+        humorComplete = false;
+        result.pending.push(...missingScores.map((key) => `runtime:humor:${prankId}:${key}`));
+        continue;
+      }
+      const invalidScores = Object.entries(humorWeights).filter(([key, max]) => (
+        !Number.isInteger(entry[key]) || entry[key] < 0 || entry[key] > max
+      ));
+      const calculatedTotal = Object.keys(humorWeights).reduce((sum, key) => sum + entry[key], 0);
+      const evidenceRefs = Array.isArray(entry.evidenceRefs) ? entry.evidenceRefs : [];
+      const evidencePrefix = prankEvidencePrefix(prankId);
+      const evidenceValid = evidenceRefs.length > 0
+        && new Set(evidenceRefs).size === evidenceRefs.length
+        && evidenceRefs.every((reference) => typeof reference === 'string'
+          && reference.startsWith(evidencePrefix)
+          && scenarioEvidenceSet.has(reference))
+        && evidenceRefs.some((reference) => reference.toLowerCase().endsWith('.png'));
+      const deductionsValid = meaningfulReviewList(entry.deductions);
+      const optimizationsValid = meaningfulReviewList(entry.optimizations);
+      const reevaluationValid = meaningfulReviewText(entry.reevaluationNotes);
+      if (invalidScores.length || !Number.isInteger(entry.total) || entry.total !== calculatedTotal || !evidenceValid || !deductionsValid || !optimizationsValid || !reevaluationValid) {
+        result.failed = true;
+        humorFailed = true;
+        addIssue(
+          'error',
+          'manual-humor-invalid',
+          `The ${prankId} humor review is incomplete, stale, or internally inconsistent.`,
+          'Use current scenario image evidence, score all six weighted dimensions, make total equal their sum, and write meaningful deductions, optimizations, and reevaluation notes.',
+          {
+            prankId,
+            calculatedTotal,
+            reportedTotal: entry.total,
+            invalidDimensions: invalidScores.map(([key]) => key),
+            evidenceRefs,
+            evidenceValid,
+            deductionsValid,
+            optimizationsValid,
+            reevaluationValid
+          },
+          20
+        );
+      } else if (entry.total < humorContract.threshold || entry.status === 'fail') {
+        result.failed = true;
+        humorFailed = true;
+        addIssue(
+          'error',
+          'manual-humor-below-threshold',
+          `${prankId} humor review failed (${entry.total}/100; required: ${humorContract.threshold}).`,
+          'Apply the recorded optimizations, capture this prank again, and repeat its six-dimension humor review.',
+          { prankId, total: entry.total, deductions: entry.deductions, optimizations: entry.optimizations, reevaluationNotes: entry.reevaluationNotes },
+          20
+        );
+      } else if (entry.status !== 'pass') {
+        result.complete = false;
+        humorComplete = false;
+        result.pending.push(`runtime:humor:${prankId}:status`);
+      }
+    }
+    result.humor.status = humorFailed
+      ? 'fail'
+      : humorComplete && expectedPrankIds.every((prankId) => reviews.find((entry) => entry?.prankId === prankId)?.status === 'pass')
+        ? 'pass'
+        : 'pending';
+  }
   return result;
 }
 
@@ -475,16 +814,11 @@ function processingKey(characterId, action) {
 const uniqueFrames = new Map();
 const generationManifest = await validateGenerationManifest();
 const identityQuality = validateIdentityQuality();
-const expectedFrameCounts = {
-  crawl_right: 2,
-  crawl_left: 2,
-  idle_right: 1,
-  idle_left: 1,
-  centipede_right: 1,
-  centipede_left: 1,
-  shout: 3,
-  drag: 1
-};
+const actionDrift = compareActionContract(actionContract, manifest);
+for (const id of actionDrift.duplicateCharacterIds) addIssue('error', 'duplicate-character', `Duplicate manifest character: ${id}.`, 'Regenerate the sprite manifest from the canonical project character list.', { characterId: id }, 25);
+for (const id of actionDrift.unexpectedCharacterIds) addIssue('error', 'unexpected-character', `Unexpected manifest character: ${id}.`, 'Remove characters that are not in pet.config.json.', { characterId: id }, 25);
+for (const { characterId, action } of actionDrift.missingActions) addIssue('error', 'missing-canonical-action', `${characterId} is missing canonical action ${action}.`, 'Generate and process the action required by the selected mode and role.', { characterId, action }, 20);
+for (const { characterId, action } of actionDrift.unexpectedActions) addIssue('error', 'unexpected-role-action', `${characterId} has unexpected role action ${action}.`, 'Remove role actions that do not belong to this character in the selected mode.', { characterId, action }, 20);
 for (const [artifact, label] of [[identityBoardPath, 'identity board'], [contactSheetPath, 'action contact sheet']]) {
   if (!fs.existsSync(artifact)) {
     addIssue('error', 'missing-review-artifact', `Missing ${label}: ${artifact}`, `Create ${path.basename(artifact)} before visual self-review.`, { artifact }, 20);
@@ -495,6 +829,11 @@ for (const character of config.characters) {
   if (!entry) {
     addIssue('error', 'missing-character', `Manifest is missing ${character.id}.`, `Reprocess ${character.id}'s action sheet.`, { characterId: character.id }, 25);
     continue;
+  }
+  const expectedFrameCounts = {};
+  for (const action of actionContract.actionsByCharacter[character.id] || []) {
+    const descriptor = actionFrameDescriptor(action, character.id);
+    expectedFrameCounts[descriptor.group] = Math.max(expectedFrameCounts[descriptor.group] || 0, descriptor.index + 1);
   }
   for (const [group, expectedCount] of Object.entries(expectedFrameCounts)) {
     const actualCount = entry.frames?.[group]?.length || 0;
@@ -509,8 +848,9 @@ for (const character of config.characters) {
       );
     }
   }
-  const expectedShoutFrames = [1, 2, 3].map((frame) => `${character.id}/shout_${frame}.png`);
-  if (JSON.stringify(entry.frames?.shout || []) !== JSON.stringify(expectedShoutFrames)) {
+  const expectsShout = actionContract.rolesByCharacter[character.id]?.groupShoutParticipant;
+  const expectedShoutFrames = expectsShout ? [1, 2, 3].map((frame) => `${character.id}/shout_${frame}.png`) : [];
+  if (expectsShout && JSON.stringify(entry.frames?.shout || []) !== JSON.stringify(expectedShoutFrames)) {
     addIssue(
       'error',
       'invalid-kneel-shout-runtime-mapping',
@@ -520,13 +860,14 @@ for (const character of config.characters) {
       20
     );
   }
-  const roleGroups = poopChase.enabled
-    ? character.id === poopChase.leaderId
-      ? ['poop_right', 'poop_left']
-      : poopFollowers.includes(character.id)
-        ? ['eat_right', 'eat_left']
-        : []
-    : [];
+  const chaseRole = actionContract.rolesByCharacter[character.id]?.chaseRole;
+  const roleGroups = chaseRole === 'poop'
+    ? ['poop_right', 'poop_left']
+    : chaseRole === 'eat'
+      ? ['eat_right', 'eat_left']
+      : chaseRole === 'centipede'
+        ? ['centipede_right', 'centipede_left']
+        : [];
   for (const group of roleGroups) {
     const actualCount = entry.frames?.[group]?.length || 0;
     if (actualCount < 1) {
@@ -548,7 +889,7 @@ for (const character of config.characters) {
       characterFiles.get(character.id)?.push(path.join(spriteRoot, relative));
     }
   }
-  for (const direction of ['right', 'left']) {
+  if (chaseRole === 'centipede') for (const direction of ['right', 'left']) {
     const anchors = entry.anchors?.[direction];
     const head = anchors?.head;
     const mouth = anchors?.mouth;
@@ -659,6 +1000,7 @@ for (const [relative, usages] of uniqueFrames) {
     let semiTransparent = 0;
     let visiblePixels = 0;
     let keyLikePixels = 0;
+    let opaqueBoundaryKeyLikePixels = 0;
     const action = actionFromRelative(relative);
     const key = processingKey(primary.characterId, action);
     for (let y = 0; y < height; y += 1) {
@@ -671,7 +1013,25 @@ for (const [relative, usages] of uniqueFrames) {
         if (x === 0 || y === 0 || x === width - 1 || y === height - 1) edgePixels += 1;
         if (key) {
           const distance = Math.hypot(raw.data[offset] - key[0], raw.data[offset + 1] - key[1], raw.data[offset + 2] - key[2]);
-          if (distance < 48) keyLikePixels += 1;
+          if (distance < 48) {
+            keyLikePixels += 1;
+            if (alpha >= 192) {
+              let touchesTransparency = false;
+              for (let dy = -1; dy <= 1 && !touchesTransparency; dy += 1) {
+                for (let dx = -1; dx <= 1; dx += 1) {
+                  if (dx === 0 && dy === 0) continue;
+                  const neighborX = x + dx;
+                  const neighborY = y + dy;
+                  if (neighborX < 0 || neighborY < 0 || neighborX >= width || neighborY >= height) continue;
+                  if (raw.data[(neighborY * width + neighborX) * 4 + 3] <= 12) {
+                    touchesTransparency = true;
+                    break;
+                  }
+                }
+              }
+              if (touchesTransparency) opaqueBoundaryKeyLikePixels += 1;
+            }
+          }
         }
       }
     }
@@ -693,7 +1053,8 @@ for (const [relative, usages] of uniqueFrames) {
       },
       semiTransparentRatio: round(semiTransparent / Math.max(1, visiblePixels)),
       edgePixels,
-      keySpillRatio: round(keyLikePixels / Math.max(1, visiblePixels))
+      keySpillRatio: round(keyLikePixels / Math.max(1, visiblePixels)),
+      opaqueBoundaryKeySpillRatio: round(opaqueBoundaryKeyLikePixels / Math.max(1, visiblePixels))
     };
     frameMetrics.push(metric);
     frameBuffers.set(relative, raw.data);
@@ -710,8 +1071,12 @@ for (const [relative, usages] of uniqueFrames) {
     if (Math.hypot(centerX - 0.5, centerY - 0.5) > 0.19) {
       addIssue('warning', 'subject-off-center', `${relative} is strongly off-center.`, `Regenerate or recrop ${primary.characterId}'s sheet with consistent centering.`, { ...primary, frame: relative }, 4);
     }
-    if (keyLikePixels / Math.max(1, visiblePixels) > 0.025) {
-      addIssue('warning', 'chroma-spill', `${relative} retains ${(keyLikePixels / visiblePixels * 100).toFixed(1)}% key-like visible pixels.`, `Regenerate ${primary.characterId}'s sheet with cleaner flat-key separation or adjust key removal.`, { ...primary, frame: relative }, 6);
+    const keySpillRatio = keyLikePixels / Math.max(1, visiblePixels);
+    const opaqueBoundaryKeySpillRatio = opaqueBoundaryKeyLikePixels / Math.max(1, visiblePixels);
+    if (opaqueBoundaryKeyLikePixels >= 8 && opaqueBoundaryKeySpillRatio > 0.01) {
+      addIssue('error', 'chroma-spill', `${relative} has a clearly visible opaque key-colour fringe along its transparent boundary (${(opaqueBoundaryKeySpillRatio * 100).toFixed(1)}%).`, `Regenerate or repair ${primary.characterId}'s sheet until the opaque key-colour fringe is removed.`, { ...primary, frame: relative, opaqueBoundaryKeyLikePixels }, 18);
+    } else if (keySpillRatio > 0.025) {
+      addIssue('warning', 'chroma-spill', `${relative} retains ${(keySpillRatio * 100).toFixed(1)}% key-like visible pixels.`, `Regenerate ${primary.characterId}'s sheet with cleaner flat-key separation or adjust key removal.`, { ...primary, frame: relative }, 6);
     }
   } catch (error) {
     addIssue('error', 'unreadable-frame', `Could not inspect ${relative}: ${error.message}`, `Reprocess ${primary.characterId}'s action sheet.`, { ...primary, frame: relative }, 25);
@@ -719,6 +1084,7 @@ for (const [relative, usages] of uniqueFrames) {
 }
 
 for (const character of config.characters) {
+  if (actionContract.rolesByCharacter[character.id]?.chaseRole !== 'centipede') continue;
   const entry = manifest.characters.find((item) => item.id === character.id);
   if (!entry) continue;
   for (const direction of ['right', 'left']) {
@@ -788,6 +1154,129 @@ if (config.characters.length > 1) {
 }
 
 let runtimeMetrics = null;
+let runtimeEvidence = null;
+const runtimeEvidenceCandidates = [runtimePath, runtimeSecondPath, runtimePausedPath, runtimeTechnicalPath, runtimeEvidenceManifestPath].filter(Boolean);
+const hasAnyRuntimeEvidence = runtimeEvidenceCandidates.some((file) => fs.existsSync(file));
+if (hasAnyRuntimeEvidence) {
+  if (!fs.existsSync(runtimeEvidenceManifestPath)) {
+    addIssue('error', 'runtime-product-evidence-missing', 'Runtime evidence manifest is missing, so technical smoke cannot prove the normal desktop experience.', 'Refresh runtime evidence to create two live desktop frames, technical smoke, and the manifest.', {}, 25);
+  } else {
+    try {
+      runtimeEvidence = readJson(runtimeEvidenceManifestPath);
+      const expectedKinds = new Map([
+        ['normal-live-1', runtimePath || path.join(preview, 'runtime-window.png')],
+        ['normal-live-2', runtimeSecondPath],
+        ['normal-paused', runtimePausedPath],
+        ['technical-window-count', runtimeTechnicalPath]
+      ]);
+      const entries = Array.isArray(runtimeEvidence.evidence) ? runtimeEvidence.evidence : [];
+      const byKind = new Map(entries.map((entry) => [entry?.kind, entry]));
+      const expectedIds = config.characters.map((character) => character.id);
+      if (JSON.stringify(runtimeEvidence.expectedCharacterIds || []) !== JSON.stringify(expectedIds)) {
+        addIssue('error', 'runtime-evidence-character-mismatch', 'Runtime evidence does not cover the current configured character order.', 'Refresh runtime evidence from the current project.', {}, 20);
+      }
+      const display = runtimeEvidence.display;
+      if (!display || ![display.width, display.height, display.scaleFactor].every(Number.isFinite) || display.width <= 0 || display.height <= 0 || display.scaleFactor <= 0) {
+        addIssue('error', 'runtime-evidence-display-invalid', 'Runtime evidence does not declare a valid captured display.', 'Refresh runtime evidence on a supported desktop.', {}, 20);
+      }
+      const captureArea = runtimeEvidence.captureArea;
+      const captureAreaValid = captureArea && [captureArea.x, captureArea.y, captureArea.width, captureArea.height].every(Number.isFinite)
+        && captureArea.x >= 0 && captureArea.y >= 0 && captureArea.width > 0 && captureArea.height > 0
+        && display && captureArea.x + captureArea.width <= display.width && captureArea.y + captureArea.height <= display.height;
+      if (!captureAreaValid) {
+        addIssue('error', 'runtime-product-evidence-area-invalid', 'Runtime product evidence does not declare a safe compositor crop inside the captured display.', 'Refresh runtime evidence from the controlled validation surface.', {}, 20);
+      }
+      const surface = runtimeEvidence.surface;
+      if (!surface || surface.kind !== 'controlled-validation' || surface.containsUserDesktopContent !== false) {
+        addIssue('error', 'runtime-product-evidence-surface-invalid', 'Runtime product evidence does not attest the controlled private validation surface.', 'Refresh runtime evidence without exposing the user desktop or other applications.', {}, 25);
+      }
+      for (const [kind, expectedFile] of expectedKinds) {
+        const entry = byKind.get(kind);
+        if (!entry) {
+          addIssue('error', 'runtime-product-evidence-missing', `Runtime evidence is missing ${kind}.`, 'Refresh the complete runtime evidence set.', { kind }, 25);
+          continue;
+        }
+        if (kind === 'normal-paused' && entry.paused !== true) {
+          addIssue('error', 'runtime-paused-state-invalid', 'The paused runtime composition is not explicitly recorded as paused.', 'Refresh runtime evidence while the behavior engine is paused.', { kind }, 25);
+        }
+        if (typeof entry.file !== 'string' || path.isAbsolute(entry.file) || entry.file.includes('..')) {
+          addIssue('error', 'runtime-evidence-path-invalid', `Runtime evidence ${kind} uses an unsafe file path.`, 'Refresh runtime evidence with relative preview paths only.', { kind }, 20);
+          continue;
+        }
+        const resolved = path.resolve(path.dirname(runtimeEvidenceManifestPath), entry.file);
+        if (resolved !== path.resolve(expectedFile)) {
+          addIssue('error', 'runtime-evidence-file-mismatch', `Runtime evidence ${kind} points to the wrong file.`, 'Refresh runtime evidence without renaming or substituting captures.', { kind }, 20);
+          continue;
+        }
+        if (!fs.existsSync(resolved)) {
+          addIssue('error', 'runtime-product-evidence-missing', `Runtime evidence file is missing for ${kind}.`, 'Refresh the complete runtime evidence set.', { kind }, 25);
+          continue;
+        }
+        if (fileHash(resolved) !== entry.sha256) {
+          addIssue('error', 'runtime-evidence-hash-mismatch', `Runtime evidence file changed after capture: ${kind}.`, 'Refresh runtime evidence and repeat manual review.', { kind }, 25);
+        }
+        if (fs.statSync(resolved).mtimeMs < newestSpriteTime) {
+          addIssue('error', 'stale-runtime', `Runtime evidence ${kind} is older than the current sprite frames.`, 'Refresh all runtime evidence from the current project.', { kind }, 18);
+        }
+        const metadata = await sharp(resolved).metadata();
+        if (metadata.width !== entry.width || metadata.height !== entry.height) {
+          addIssue('error', 'runtime-evidence-dimension-mismatch', `Runtime evidence dimensions changed after capture: ${kind}.`, 'Refresh runtime evidence from the current project.', { kind }, 18);
+        }
+        if (kind.startsWith('normal-') && captureAreaValid && display) {
+          const expectedWidth = Math.round(captureArea.width * display.scaleFactor);
+          const expectedHeight = Math.round(captureArea.height * display.scaleFactor);
+          if (Math.abs(metadata.width - expectedWidth) > 1 || Math.abs(metadata.height - expectedHeight) > 1) {
+            addIssue('error', 'runtime-product-evidence-area-mismatch', `${kind} dimensions do not match the declared controlled compositor crop.`, 'Refresh runtime evidence without resizing, substituting, or recropping the product frames.', { kind }, 20);
+          }
+        }
+        if (kind === 'technical-window-count' && (metadata.width < config.render.windowSize || metadata.height < config.render.windowSize)) {
+          addIssue('error', 'runtime-technical-evidence-small', 'Technical smoke is too small to prove a readable live pet window.', 'Refresh the deterministic multi-window technical smoke.', { kind }, 15);
+        }
+        const characterEvidence = Array.isArray(entry.characters) ? entry.characters : [];
+        const evidenceIds = characterEvidence.map((character) => character?.id).filter((id) => typeof id === 'string' && id);
+        const evidenceIdSet = new Set(evidenceIds);
+        const missingIds = expectedIds.filter((id) => !evidenceIdSet.has(id));
+        const duplicateIds = evidenceIds.filter((id, index) => evidenceIds.indexOf(id) !== index);
+        const unreadableIds = characterEvidence.filter((character) => {
+          if (!character || character.visible !== true) return true;
+          if (!character.bounds || ![character.bounds.x, character.bounds.y, character.bounds.width, character.bounds.height].every(Number.isFinite)) return true;
+          if (character.bounds.width <= 0 || character.bounds.height <= 0) return true;
+          if (kind.startsWith('normal-')) {
+            return !Number.isFinite(character.desktopForegroundRatio) || character.desktopForegroundRatio < 0.005;
+          }
+          if (kind === 'technical-window-count') {
+            return !Number.isFinite(character.alphaCoverage) || character.alphaCoverage < 0.001;
+          }
+          return false;
+        }).map((character) => character?.id || 'unknown');
+        if (
+          characterEvidence.length !== expectedIds.length ||
+          evidenceIdSet.size !== expectedIds.length ||
+          missingIds.length || duplicateIds.length || unreadableIds.length
+        ) {
+          addIssue(
+            'error',
+            'runtime-evidence-character-coverage',
+            `Runtime evidence ${kind} does not prove every configured pet window is visible and readable.`,
+            'Refresh the complete multi-window runtime evidence; per-window or incomplete captures are not accepted.',
+            { kind, missingIds, duplicateIds: [...new Set(duplicateIds)], unreadableIds },
+            25
+          );
+        }
+      }
+      const first = byKind.get('normal-live-1');
+      const second = byKind.get('normal-live-2');
+      if (first?.sha256 && second?.sha256 && first.sha256 === second.sha256) {
+        addIssue('error', 'runtime-product-evidence-frozen', 'The two normal-mode desktop frames are byte-identical and do not prove live motion.', 'Capture two distinct live normal-mode moments before deterministic staging.', {}, 25);
+      }
+      if (byKind.size !== entries.length) {
+        addIssue('error', 'runtime-evidence-duplicate-kind', 'Runtime evidence repeats a capture kind.', 'Refresh the evidence manifest from the runtime.', {}, 18);
+      }
+    } catch (error) {
+      addIssue('error', 'runtime-evidence-unreadable', `Could not validate runtime evidence: ${error.message}`, 'Refresh the complete runtime evidence set.', {}, 25);
+    }
+  }
+}
 if (runtimePath) {
   if (!fs.existsSync(runtimePath)) {
     addIssue('error', 'missing-runtime', `Runtime screenshot does not exist: ${runtimeRelative}`, 'Run the smoke capture again before delivery.', {}, 25);
@@ -813,8 +1302,8 @@ if (runtimePath) {
       if (!bounds || bounds.coverage < 0.01 || channelMax - channelMin < 8) {
         addIssue('error', 'blank-runtime', 'Runtime screenshot is blank or contains no readable pet.', 'Fix runtime rendering and capture a new runtime-window.png.', {}, 25);
       }
-      if (raw.info.width !== config.render.windowSize || raw.info.height !== config.render.windowSize) {
-        addIssue('warning', 'runtime-dimensions', `Runtime screenshot is ${raw.info.width}x${raw.info.height}; expected ${config.render.windowSize}x${config.render.windowSize}.`, 'Repeat the smoke capture with the generated pet window.', {}, 5);
+      if (raw.info.width < config.render.windowSize || raw.info.height < config.render.windowSize) {
+        addIssue('warning', 'runtime-dimensions', `Runtime screenshot is ${raw.info.width}x${raw.info.height}; expected a readable composition at least ${config.render.windowSize}x${config.render.windowSize}.`, 'Repeat the smoke capture with every generated pet window visible.', {}, 5);
       }
     } catch (error) {
       addIssue('error', 'unreadable-runtime', `Could not inspect runtime screenshot: ${error.message}`, 'Repeat the runtime smoke capture.', {}, 25);
@@ -832,14 +1321,18 @@ const characterFingerprints = Object.fromEntries(config.characters.map((characte
   ])
 ]));
 const scenarioEvidence = scenarioEvidenceFiles(scenarioRoot);
-const runtimeFingerprint = runtimePath ? combinedHash([
-  `runtime:${fileHash(runtimePath)}`,
-  ...scenarioEvidence.map((file) => `${portableRelative(outputRoot, file)}:${fileHash(file)}`)
+const scenarioEvidencePaths = scenarioEvidence.map((file) => portableRelative(outputRoot, file));
+const releaseEligibleHumorEvidencePaths = releaseEligibleScenarioEvidencePaths(scenarioRoot);
+const runtimeFingerprint = hasAnyRuntimeEvidence ? combinedHash([
+  'runtime:manual-review',
+  `humor-contract:${humorContractFingerprint}`,
+  ...runtimeEvidenceCandidates.filter((file) => fs.existsSync(file)).map((file) => `${portableRelative(outputRoot, file)}:${fileHash(file)}`),
+  ...scenarioEvidence.map((file, index) => `${scenarioEvidencePaths[index]}:${fileHash(file)}`)
 ]) : null;
 const reviewExisted = fs.existsSync(reviewPath);
-if (!reviewExisted) writeJson(reviewPath, expectedReview(characterFingerprints, runtimeFingerprint));
+if (!reviewExisted) writeJson(reviewPath, expectedReview(characterFingerprints, runtimeFingerprint, releaseEligibleHumorEvidencePaths));
 const review = readJson(reviewPath);
-const manual = reviewStatus(review, characterFingerprints, runtimeFingerprint);
+const manual = reviewStatus(review, characterFingerprints, runtimeFingerprint, releaseEligibleHumorEvidencePaths);
 const totalPenalty = issues.reduce((sum, issue) => sum + issue.penalty, 0);
 const overallScore = Math.max(0, 100 - totalPenalty);
 const hasErrors = issues.some((issue) => issue.severity === 'error');
@@ -869,13 +1362,19 @@ const report = {
     provided: manual.provided,
     complete: manual.complete,
     pending: manual.pending,
-    failed: manual.failed
+    failed: manual.failed,
+    humor: manual.humor
   },
   artifacts: {
     identityBoard: { path: portableRelative(outputRoot, identityBoardPath), fingerprint: identityFingerprint },
     actionContactSheet: { path: portableRelative(outputRoot, contactSheetPath), fingerprint: contactSheetFingerprint },
     characters: characterFingerprints,
     runtimeWindow: runtimePath ? { path: runtimeRelative, fingerprint: runtimeFingerprint } : null,
+    runtimeEvidence: runtimeEvidence ? {
+      path: portableRelative(outputRoot, runtimeEvidenceManifestPath),
+      files: runtimeEvidenceCandidates.filter((file) => fs.existsSync(file)).map((file) => portableRelative(outputRoot, file)),
+      fingerprint: runtimeFingerprint
+    } : null,
     scenarioEvidence: scenarioEvidence.map((file) => ({ path: portableRelative(outputRoot, file), fingerprint: fileHash(file) })),
     generationManifest: generationManifest ? { path: portableRelative(outputRoot, generationManifestPath), fingerprint: fileHash(generationManifestPath) } : null
     ,identityQualityReview: identityQuality ? { path: portableRelative(outputRoot, identityQualityPath), fingerprint: fileHash(identityQualityPath) } : null

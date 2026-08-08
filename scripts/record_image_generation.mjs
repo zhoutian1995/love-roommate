@@ -3,13 +3,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { applyCodexRuntimeArgs, fail, loadSharp, parseArgs, readJson, writeJson } from './lib/common.mjs';
 import { portableRelative } from './lib/privacy.mjs';
+import { validateCorrectionLineage } from './lib/transparency-retry.mjs';
+import {
+  DEFAULT_GENERATION_ATTESTATION,
+  NATIVE_TRANSPARENCY_ATTESTATION,
+  isNativeTransparencyFallback,
+  isSupportedGeneratedAttestation
+} from './lib/generation-attestation.mjs';
 
 const args = parseArgs(process.argv.slice(2));
 applyCodexRuntimeArgs(args);
 if (!args.preview || !args.file || !args.kind) {
-  fail('Usage: node record_image_generation.mjs --preview <preview-dir> --file <image> --kind identity|master|action|base|role [--character person-1] [--action <name>] [--role leader|follower] [--master-fingerprint <sha256>] [--prompt-version v1] [--version 1] [--image-generation-id ig_<50-hex>] [--origin generated|derived] [--derived-from-action <name> --transform horizontal-flip] [--supersedes <relative-file>] [--reason <text>]');
+  fail('Usage: node record_image_generation.mjs --preview <preview-dir> --file <image> --kind identity|master|action|base|role [--character person-1] [--action <name>] [--role leader|follower] [--master-fingerprint <sha256>] [--prompt-version v1] [--version 1] [--image-generation-id ig_<50-hex>] [--origin generated|derived] [--derived-from-action <name> --transform horizontal-flip] [--supersedes <relative-file>] [--reason <text>] [--transparency-attempt <1..3> --transparency-key <#RRGGBB> --rejection-reason <code> --correction-report <relative-path>] [--authorized-native-transparency-fallback]');
 }
 if (Object.hasOwn(args, 'model')) fail('--model is no longer accepted. The Skill records a fixed workflow attestation because local PNG files do not contain verifiable model metadata.');
+const nativeFallbackFlag = 'authorized-native-transparency-fallback';
+const hasNativeFallbackFlag = Object.hasOwn(args, nativeFallbackFlag);
+const nativeFallback = args[nativeFallbackFlag] === true;
+if (hasNativeFallbackFlag && !nativeFallback) fail(`--${nativeFallbackFlag} is a closed authorization flag and must not receive a value.`);
 if (!['identity', 'master', 'action', 'base', 'role'].includes(args.kind)) fail('--kind must be identity, master, action, base, or role.');
 if (args.kind !== 'identity' && !args.character) fail('--character is required for non-identity assets.');
 if (args.kind === 'identity' && (args.character || args.role)) fail('identity records must not include --character or --role.');
@@ -20,12 +31,26 @@ if (args.kind === 'action' && !args.action) fail('--action is required for actio
 const origin = args.origin || 'generated';
 if (!['generated', 'derived'].includes(origin)) fail('--origin must be generated or derived.');
 if (origin === 'derived' && args.kind !== 'action') fail('Only action assets may use --origin derived.');
+if (nativeFallback && (origin !== 'generated' || !['master', 'action'].includes(args.kind))) fail(`--${nativeFallbackFlag} is accepted only for generated master or action assets.`);
 if (args.kind === 'action' && origin === 'generated' && (!args['master-fingerprint'] || !args['prompt-version'] || !args.version)) fail('generated action records require --master-fingerprint, --prompt-version, and --version.');
 if (args['image-generation-id'] && (args.kind !== 'action' || origin !== 'generated')) fail('--image-generation-id is accepted only for generated action records.');
 if (args['image-generation-id'] && !/^ig_[0-9a-f]{50}$/i.test(String(args['image-generation-id']))) fail('--image-generation-id must be an image generation id in the form ig_<50-hex>.');
 if (args.kind === 'action' && origin === 'derived' && (!args['derived-from-action'] || args.transform !== 'horizontal-flip' || !args.version)) fail('derived action records require --derived-from-action, --transform horizontal-flip, and --version.');
-if (origin === 'derived' && (args['master-fingerprint'] || args['prompt-version'] || args.model)) fail('derived action records must not include native generation attestation arguments.');
+if (origin === 'derived' && (args['master-fingerprint'] || args['prompt-version'] || args.model || hasNativeFallbackFlag)) fail('derived action records must not include native generation attestation arguments.');
 if (args.kind === 'master' && (!args['prompt-version'] || !args.version)) fail('master records require --prompt-version and --version.');
+const hasTransparencyRecovery = ['transparency-attempt', 'transparency-key', 'rejection-reason', 'correction-report']
+  .some((name) => Object.hasOwn(args, name));
+let transparencyAttempt = null;
+let transparencyKey = null;
+if (hasTransparencyRecovery) {
+  if (nativeFallback) fail(`--${nativeFallbackFlag} cannot be combined with chroma transparency recovery metadata.`);
+  if (!['master', 'action'].includes(args.kind) || origin !== 'generated') fail('Transparency recovery metadata is accepted only for generated master or action assets.');
+  transparencyAttempt = Number(args['transparency-attempt']);
+  transparencyKey = String(args['transparency-key'] || '').toLowerCase();
+  if (!Number.isInteger(transparencyAttempt) || transparencyAttempt < 1 || transparencyAttempt > 3) fail('--transparency-attempt must be an integer from 1..3.');
+  if (!/^#[0-9a-f]{6}$/i.test(transparencyKey)) fail('--transparency-key must be a #RRGGBB color.');
+  if (args['rejection-reason'] && !/^[a-z0-9][a-z0-9-]{0,79}$/.test(String(args['rejection-reason']))) fail('--rejection-reason must be a short lowercase code.');
+}
 const allowedActions = new Set([
   'crawl_right_1', 'crawl_right_2', 'crawl_left_1', 'crawl_left_2',
   'idle_right', 'idle_left', 'centipede_right', 'centipede_left',
@@ -57,17 +82,22 @@ try {
 }
 if (!relative.startsWith('preview/')) fail('Generated image must be stored inside the preview directory.');
 const fileSha = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+if (nativeFallback) {
+  if (path.extname(file).toLowerCase() !== '.png') fail('Native transparency fallback requires a PNG file.');
+  const { data, info } = await loadSharp(outputRoot)(file).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  let transparentPixels = 0;
+  for (let offset = 3; offset < data.length; offset += info.channels) {
+    if (data[offset] < 255) transparentPixels += 1;
+  }
+  if (transparentPixels === 0) fail('Native transparency fallback PNG must contain transparent pixels.');
+}
 
 const manifestPath = path.join(preview, 'generation-manifest.json');
 const manifest = fs.existsSync(manifestPath)
   ? readJson(manifestPath)
   : {
       schemaVersion: 3,
-      provenancePolicy: {
-        generator: 'codex-imagegen',
-        declaredModelPolicy: 'gpt-image-2',
-        evidenceLevel: 'workflow-attested'
-      },
+      provenancePolicy: { ...DEFAULT_GENERATION_ATTESTATION },
       assets: []
     };
 const policy = manifest.provenancePolicy || {};
@@ -92,9 +122,8 @@ const isImageGenerationIdAugmentation = Boolean(
   && args['image-generation-id']
   && !Object.hasOwn(previous, 'imageGenerationId')
   && (previous.origin || 'generated') === 'generated'
-  && previous.generator === 'codex-imagegen'
-  && previous.declaredModelPolicy === 'gpt-image-2'
-  && previous.evidenceLevel === 'workflow-attested'
+  && isSupportedGeneratedAttestation(previous)
+  && isNativeTransparencyFallback(previous) === nativeFallback
   && version === previous.version
   && relative === previous.file
   && fileSha === previous.sha256
@@ -154,7 +183,7 @@ if (args.kind === 'action' && origin === 'derived') {
   derivedSource = manifest.assets.find((item) => item.kind === 'action' && item.characterId === args.character && item.action === sourceAction);
   if (!derivedSource) fail(`Derived action requires a recorded source action for the same character: ${sourceAction}.`);
   if ((derivedSource.origin || 'generated') !== 'generated') fail('Derived action chains are forbidden; the source must be a generated source action.');
-  if (derivedSource.generator !== 'codex-imagegen' || derivedSource.declaredModelPolicy !== 'gpt-image-2' || derivedSource.evidenceLevel !== 'workflow-attested') {
+  if (!isSupportedGeneratedAttestation(derivedSource)) {
     fail('Derived action source is missing its native generation workflow attestation.');
   }
   const sourceFile = path.resolve(outputRoot, derivedSource.file || '');
@@ -207,11 +236,33 @@ const entry = {
   file: relative,
   sha256: fileSha
 };
+if (hasTransparencyRecovery) {
+  const recovery = {
+    attempt: transparencyAttempt,
+    key: transparencyKey,
+    ...(args['rejection-reason'] ? { rejectionReason: String(args['rejection-reason']) } : {})
+  };
+  if (args['correction-report']) {
+    const reportFile = path.resolve(outputRoot, ...String(args['correction-report']).replaceAll('\\', '/').split('/'));
+    let reportRelative;
+    try {
+      reportRelative = portableRelative(outputRoot, reportFile, 'Correction report');
+    } catch (error) {
+      fail(error.message);
+    }
+    if (!reportRelative.startsWith('preview/') || !fs.existsSync(reportFile) || !fs.statSync(reportFile).isFile()) {
+      fail('--correction-report must reference an existing JSON file inside preview/.');
+    }
+    recovery.correctionReport = reportRelative;
+    recovery.correctionReportSha256 = crypto.createHash('sha256').update(fs.readFileSync(reportFile)).digest('hex');
+  }
+  entry.transparencyRecovery = recovery;
+  const correctionErrors = validateCorrectionLineage(outputRoot, entry);
+  if (correctionErrors.length) fail(`Invalid transparency correction lineage: ${correctionErrors.join(' ')}`);
+}
 if (origin === 'generated') Object.assign(entry, {
   ...(args['image-generation-id'] ? { imageGenerationId: String(args['image-generation-id']) } : {}),
-  generator: 'codex-imagegen',
-  declaredModelPolicy: 'gpt-image-2',
-  evidenceLevel: 'workflow-attested'
+  ...(nativeFallback ? NATIVE_TRANSPARENCY_ATTESTATION : DEFAULT_GENERATION_ATTESTATION)
 });
 else Object.assign(entry, {
   sourceAction: derivedSource.action,

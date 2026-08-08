@@ -19,9 +19,10 @@
     }
   ],
   "selection": {
-    "mode": "centipede",
+    "mode": "normal",
     "userCharacterId": null,
-    "prankExcludedCharacterIds": []
+    "prankExcludedCharacterIds": [],
+    "chaseVariant": null
   },
   "packaging": {
     "windowsTarget": "portable",

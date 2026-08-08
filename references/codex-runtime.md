@@ -10,6 +10,7 @@ The user-facing requirement is: install Codex Desktop and keep it online during 
 4. Reuse Codex's bundled `sharp` package for image processing. If its dependency tree cannot load, let the Skill install the pinned Sharp 0.34.5 fallback from the approved registry with a frozen lockfile.
 5. Let the scripts cache the pinned Electron runtime under the operating-system temp directory; generated projects and the published Skill do not contain dependency caches.
 6. Use built-in `$imagegen`; do not request `OPENAI_API_KEY` for the normal path.
+7. 默认路径仍使用内置 `$imagegen`。只有键色与本地蒙版都失败，并且用户显式授权真透明 fallback 时，才可通过 CLI 使用 `gpt-image-1.5` 原生透明 PNG；该路径需要用户在本机设置 `OPENAI_API_KEY`，不得静默切换。
 
 Do not depend on `node`, `npm`, `pnpm`, or `python` being present on the user's normal PATH. Do not modify the system PATH.
 

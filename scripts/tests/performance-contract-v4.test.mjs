@@ -15,7 +15,7 @@ const runnerSource = fs.readFileSync(path.join(skillRoot, 'scripts', 'run_perfor
 const packagerSource = fs.readFileSync(path.join(templateRoot, 'tools', 'package-current.mjs'), 'utf8');
 
 function syntheticProject() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'love-roommate-fingerprint-v3-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'love-roommate-fingerprint-v4-'));
   fs.cpSync(path.join(templateRoot, 'src'), path.join(root, 'src'), { recursive: true });
   fs.mkdirSync(path.join(root, 'tools'), { recursive: true });
   fs.writeFileSync(path.join(root, 'tools', 'package-current.mjs'), packagerSource, 'utf8');
@@ -31,8 +31,8 @@ function syntheticProject() {
   return { root, png };
 }
 
-test('performance report v3 is fail-closed on schema, fingerprint, durations, samples, and active ticker rate', () => {
-  assert.equal(audit.PERFORMANCE_REPORT_SCHEMA_VERSION, 3);
+test('performance report v4 is fail-closed on schema, fingerprints, pet-window coverage, durations, samples, and active ticker rate', () => {
+  assert.equal(audit.PERFORMANCE_REPORT_SCHEMA_VERSION, 4);
   assert.equal(audit.PERFORMANCE_FINGERPRINT_SCHEMA_VERSION, 3);
   assert.ok(audit.DEFAULT_PERFORMANCE_THRESHOLDS.activeTickerRatioMin >= 0.85);
   const result = audit.evaluatePerformanceReport({
@@ -45,7 +45,7 @@ test('performance report v3 is fail-closed on schema, fingerprint, durations, sa
       .map((name) => [name, { durationMs: 0, tickerUpdatesPerSecond: 0, samples: { frameIntervals: 0, eventLoopDelays: 0, processMetrics: 0 } }]))
   }, audit.DEFAULT_PERFORMANCE_THRESHOLDS, { expectedRuntimeFingerprint: 'f'.repeat(64) });
   const codes = new Set(result.violations.map((item) => item.code));
-  for (const code of ['report-schema', 'fingerprint-schema', 'runtime-fingerprint', 'phase-duration', 'sample-coverage', 'active-ticker']) {
+  for (const code of ['report-schema', 'fingerprint-schema', 'runtime-fingerprint', 'candidate-fingerprint', 'pet-window-identities', 'pet-window-coverage', 'phase-duration', 'sample-coverage', 'active-ticker']) {
     assert.ok(codes.has(code), `missing fail-closed violation ${code}`);
   }
 });
@@ -69,7 +69,7 @@ test('runtime fingerprint covers every src byte plus Electron version and the pa
   const electronChanged = audit.runtimeFingerprintForProject(root);
   assert.notEqual(electronChanged, packagerChanged);
 
-  const packaged = fs.mkdtempSync(path.join(os.tmpdir(), 'love-roommate-packaged-v3-'));
+  const packaged = fs.mkdtempSync(path.join(os.tmpdir(), 'love-roommate-packaged-v4-'));
   fs.cpSync(path.join(root, 'src'), path.join(packaged, 'src'), { recursive: true });
   fs.mkdirSync(path.join(packaged, 'tools'), { recursive: true });
   fs.copyFileSync(path.join(root, 'tools', 'package-current.mjs'), path.join(packaged, 'tools', 'package-current.mjs'));

@@ -18,6 +18,58 @@ function staysInside(parent, child) {
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
+function allowedMacFrameworkLink(relative, target) {
+  const normalizedRelative = relative.replaceAll('\\', '/');
+  const normalizedTarget = target.replaceAll('\\', '/');
+  if (!normalizedRelative.startsWith('release/macos/')) return false;
+  const suffixes = new Map([
+    ['/Contents/Frameworks/Electron Framework.framework/Versions/Current', 'A'],
+    ['/Contents/Frameworks/Electron Framework.framework/Resources', 'Versions/Current/Resources'],
+    ['/Contents/Frameworks/Electron Framework.framework/Electron Framework', 'Versions/Current/Electron Framework']
+  ]);
+  for (const [suffix, expectedTarget] of suffixes) {
+    if (normalizedRelative.endsWith(suffix) && normalizedTarget === expectedTarget) return true;
+  }
+  return false;
+}
+
+function auditOutputLinks() {
+  const realRoot = fs.realpathSync(root);
+  const stack = ['project', 'release', 'preview']
+    .map((relative) => path.join(root, relative))
+    .filter((directory) => fs.existsSync(directory));
+  while (stack.length) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (current === project && ['node_modules', 'dist'].includes(entry.name)) continue;
+      const full = path.join(current, entry.name);
+      const relative = portableRelative(root, full);
+      let stats;
+      try {
+        stats = fs.lstatSync(full);
+      } catch {
+        errors.push(`Unable to inspect output path: ${relative}`);
+        continue;
+      }
+      if (stats.isSymbolicLink()) {
+        let target;
+        try {
+          target = fs.readlinkSync(full);
+        } catch {
+          errors.push(`Unable to inspect output symlink: ${relative}`);
+          continue;
+        }
+        const resolvedTarget = path.resolve(path.dirname(full), target);
+        if (!allowedMacFrameworkLink(relative, target) || !staysInside(realRoot, resolvedTarget) || !fs.existsSync(resolvedTarget)) {
+          errors.push(`Output symlink or junction is not allowed: ${relative}`);
+        }
+        continue;
+      }
+      if (stats.isDirectory()) stack.push(full);
+    }
+  }
+}
+
 function findOriginalCopies(source) {
   const sourceStats = fs.statSync(source);
   const sourceHash = crypto.createHash('sha256').update(fs.readFileSync(source)).digest('hex');
@@ -65,6 +117,7 @@ function findOriginalCopies(source) {
 
 if (!fs.existsSync(projectManifestPath)) errors.push('project-manifest.json is missing.');
 if (!fs.existsSync(spriteManifestPath)) errors.push('Sprite manifest is missing.');
+if (fs.existsSync(root) && fs.statSync(root).isDirectory()) auditOutputLinks();
 
 if (!errors.length) {
   const projectManifest = readJson(projectManifestPath);

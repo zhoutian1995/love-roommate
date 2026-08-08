@@ -49,6 +49,7 @@ class BehaviorEngine {
     this.lastDropAt = Number.NEGATIVE_INFINITY;
     this.lastDropPoint = null;
     this.poopRelay = null;
+    this.formationTransition = null;
     this.shoutStartedAt = 0;
     this.shoutTargetIds = new Set();
     this.shoutSequence = null;
@@ -112,17 +113,46 @@ class BehaviorEngine {
     };
   }
 
+  windowPadding() {
+    const size = this.config.render.spriteSize;
+    const windowSize = this.config.render.windowSize;
+    return Math.max(0, (windowSize - size) / 2);
+  }
+
+  petPositionBounds(display) {
+    const padding = this.windowPadding();
+    const windowSize = this.config.render.windowSize;
+    const workArea = display.workArea;
+    return {
+      minX: workArea.x + padding,
+      maxX: workArea.x + workArea.width - windowSize + padding,
+      minY: workArea.y + padding,
+      maxY: workArea.y + workArea.height - windowSize + padding
+    };
+  }
+
+  petWindowRect(pet) {
+    const padding = this.windowPadding();
+    const windowSize = this.config.render.windowSize;
+    return {
+      left: pet.x - padding,
+      top: pet.y - padding,
+      right: pet.x - padding + windowSize,
+      bottom: pet.y - padding + windowSize
+    };
+  }
+
   createPet(character, index) {
     const display = this.displays[index % this.displays.length];
-    const size = this.config.render.spriteSize;
+    const bounds = this.petPositionBounds(display);
     const speed = this.randomBetween(this.behaviors.freeRoam.speedMin, this.behaviors.freeRoam.speedMax);
     const direction = this.random() > 0.5 ? 1 : -1;
     return {
       id: character.id,
       displayName: character.displayName,
       hueRotate: character.hueRotate || 0,
-      x: display.workArea.x + this.random() * Math.max(1, display.workArea.width - size),
-      y: display.workArea.y + display.workArea.height - size - 8 - this.random() * Math.min(120, display.workArea.height / 5),
+      x: bounds.minX + this.random() * Math.max(1, bounds.maxX - bounds.minX),
+      y: clamp(bounds.maxY - 8 - this.random() * Math.min(120, display.workArea.height / 5), bounds.minY, bounds.maxY),
       vx: direction * speed,
       vy: this.randomBetween(-10, 10),
       direction: direction > 0 ? 'right' : 'left',
@@ -150,15 +180,29 @@ class BehaviorEngine {
   clampPet(pet) {
     const size = this.config.render.spriteSize;
     const display = this.getDisplayForPoint({ x: pet.x + size / 2, y: pet.y + size / 2 });
-    pet.x = clamp(pet.x, display.workArea.x, display.workArea.x + display.workArea.width - size);
-    pet.y = clamp(pet.y, display.workArea.y, display.workArea.y + display.workArea.height - size);
+    const bounds = this.petPositionBounds(display);
+    pet.x = clamp(pet.x, bounds.minX, bounds.maxX);
+    pet.y = clamp(pet.y, bounds.minY, bounds.maxY);
+  }
+
+  petFitsWorkArea(pet) {
+    const rect = this.petWindowRect(pet);
+    return this.displays.some(({ workArea }) =>
+      rect.left >= workArea.x && rect.top >= workArea.y &&
+      rect.right <= workArea.x + workArea.width &&
+      rect.bottom <= workArea.y + workArea.height
+    );
+  }
+
+  nearestWorkAreaTarget(pet) {
+    return this.clampTargetForPet(pet, { x: pet.x, y: pet.y });
   }
 
   sanitizePet(pet, index = 0) {
-    const size = this.config.render.spriteSize;
     const display = this.displays[index % this.displays.length] || DEFAULT_DISPLAY;
-    if (!finite(pet.x)) pet.x = display.workArea.x + Math.max(0, (display.workArea.width - size) / 2);
-    if (!finite(pet.y)) pet.y = display.workArea.y + Math.max(0, display.workArea.height - size - 8);
+    const bounds = this.petPositionBounds(display);
+    if (!finite(pet.x)) pet.x = (bounds.minX + bounds.maxX) / 2;
+    if (!finite(pet.y)) pet.y = Math.max(bounds.minY, bounds.maxY - 8);
     if (!finite(pet.vx)) pet.vx = 0;
     if (!finite(pet.vy)) pet.vy = 0;
     if (!finite(pet.frame)) pet.frame = 0;
@@ -168,7 +212,6 @@ class BehaviorEngine {
     if (!finite(pet.effectSize)) pet.effectSize = this.config.render.effectSize;
     if (pet.direction !== 'left' && pet.direction !== 'right') pet.direction = pet.vx < 0 ? 'left' : 'right';
     if (typeof pet.action !== 'string' || !pet.action) pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
-    this.clampPet(pet);
   }
 
   sanitizeState() {
@@ -185,6 +228,7 @@ class BehaviorEngine {
     this.droppings = [];
     this.lastDropPoint = null;
     this.poopRelay = null;
+    this.formationTransition = null;
     this.shoutSequence = null;
     this.shoutTargetIds.clear();
     this.pets.forEach((pet) => {
@@ -194,8 +238,101 @@ class BehaviorEngine {
       pet.effectSize = this.config.render.effectSize;
       pet.poopUntil = 0;
       pet.eatUntil = 0;
+      pet.shoutRecipient = false;
       pet.dragging = false;
     });
+  }
+
+  motionSettings(overrides = {}) {
+    const configured = this.behaviors.motion || {};
+    return {
+      maxSpeed: finite(overrides.maxSpeed) && overrides.maxSpeed > 0
+        ? overrides.maxSpeed
+        : (finite(configured.maxSpeed) && configured.maxSpeed > 0 ? configured.maxSpeed : 120),
+      maxAcceleration: finite(overrides.maxAcceleration) && overrides.maxAcceleration > 0
+        ? overrides.maxAcceleration
+        : (finite(configured.maxAcceleration) && configured.maxAcceleration > 0 ? configured.maxAcceleration : 220),
+      arrivalTolerance: finite(configured.arrivalTolerance) && configured.arrivalTolerance > 0
+        ? configured.arrivalTolerance
+        : 1,
+      trailSampleDistance: finite(configured.trailSampleDistance) && configured.trailSampleDistance > 0
+        ? configured.trailSampleDistance
+        : 3
+    };
+  }
+
+  clampTargetForPet(pet, target) {
+    const size = this.config.render.spriteSize;
+    const display = this.getDisplayForPoint({
+      x: finite(target?.x) ? target.x + size / 2 : pet.x + size / 2,
+      y: finite(target?.y) ? target.y + size / 2 : pet.y + size / 2
+    });
+    const bounds = this.petPositionBounds(display);
+    return {
+      x: clamp(target?.x, bounds.minX, bounds.maxX),
+      y: clamp(target?.y, bounds.minY, bounds.maxY)
+    };
+  }
+
+  moveActorToward(pet, target, dt, overrides = {}) {
+    const settings = this.motionSettings(overrides);
+    const safeDt = finite(dt) ? Math.max(0, Math.min(0.1, dt)) : 0;
+    const safeTarget = this.clampTargetForPet(pet, target);
+    const deltaX = safeTarget.x - pet.x;
+    const deltaY = safeTarget.y - pet.y;
+    const remaining = Math.hypot(deltaX, deltaY);
+    const currentVx = finite(pet.vx) ? pet.vx : 0;
+    const currentVy = finite(pet.vy) ? pet.vy : 0;
+    const currentSpeed = Math.hypot(currentVx, currentVy);
+    if (safeDt <= 0) return remaining <= settings.arrivalTolerance;
+
+    if (remaining <= settings.arrivalTolerance && currentSpeed <= settings.maxAcceleration * safeDt + 0.01) {
+      pet.x = safeTarget.x;
+      pet.y = safeTarget.y;
+      pet.vx = 0;
+      pet.vy = 0;
+      return true;
+    }
+
+    const brakingSpeed = Math.sqrt(Math.max(0, 2 * settings.maxAcceleration * remaining));
+    const desiredSpeed = Math.min(settings.maxSpeed, brakingSpeed);
+    const desiredVx = remaining > 0 ? deltaX / remaining * desiredSpeed : 0;
+    const desiredVy = remaining > 0 ? deltaY / remaining * desiredSpeed : 0;
+    const velocityDeltaX = desiredVx - currentVx;
+    const velocityDeltaY = desiredVy - currentVy;
+    const velocityDelta = Math.hypot(velocityDeltaX, velocityDeltaY);
+    const accelerationStep = settings.maxAcceleration * safeDt;
+    const accelerationRatio = velocityDelta > accelerationStep && velocityDelta > 0
+      ? accelerationStep / velocityDelta
+      : 1;
+    let nextVx = currentVx + velocityDeltaX * accelerationRatio;
+    let nextVy = currentVy + velocityDeltaY * accelerationRatio;
+    const nextSpeed = Math.hypot(nextVx, nextVy);
+    if (nextSpeed > settings.maxSpeed) {
+      nextVx *= settings.maxSpeed / nextSpeed;
+      nextVy *= settings.maxSpeed / nextSpeed;
+    }
+
+    let stepX = nextVx * safeDt;
+    let stepY = nextVy * safeDt;
+    const stepDistance = Math.hypot(stepX, stepY);
+    const maxStep = settings.maxSpeed * safeDt;
+    if (stepDistance > maxStep && stepDistance > 0) {
+      stepX *= maxStep / stepDistance;
+      stepY *= maxStep / stepDistance;
+    }
+    if (remaining > 0 && stepX * deltaX + stepY * deltaY > 0 && Math.hypot(stepX, stepY) > remaining) {
+      stepX = deltaX;
+      stepY = deltaY;
+      nextVx = stepX / safeDt;
+      nextVy = stepY / safeDt;
+    }
+
+    pet.x += stepX;
+    pet.y += stepY;
+    pet.vx = nextVx;
+    pet.vy = nextVy;
+    return remaining <= settings.arrivalTolerance && Math.hypot(nextVx, nextVy) <= accelerationStep + 0.01;
   }
 
   initializeTrail(leader, participantCount) {
@@ -204,7 +341,7 @@ class BehaviorEngine {
     const rear = { x: leader.x + anchors.rear[0] * size, y: leader.y + anchors.rear[1] * size };
     const direction = leader.direction === 'right' ? -1 : 1;
     const requiredLength = Math.max(300, participantCount * size * 1.2);
-    this.trail = [];
+    this.trail = [{ x: rear.x, y: rear.y, direction: leader.direction }];
     for (let offset = 0; offset <= requiredLength; offset += 3) {
       this.trail.push({ x: rear.x + direction * offset, y: rear.y, direction: leader.direction });
     }
@@ -253,7 +390,7 @@ class BehaviorEngine {
   }
 
   prankExcludedIds() {
-    const excludedIds = new Set(this.config.selection?.prankExcludedCharacterIds || []);
+    const excludedIds = new Set();
     const recipientId = this.config.selection?.userCharacterId;
     if (recipientId) excludedIds.add(recipientId);
     return excludedIds;
@@ -294,8 +431,11 @@ class BehaviorEngine {
       skippedReason: participants.length ? null : 'no-eligible-participants'
     };
     if (!participants.length) return result;
-    this.interruptFormation();
     const formation = this.groupShoutTargets(participants, recipient);
+    if (formation.skippedReason) {
+      return { ...result, started: false, skippedReason: formation.skippedReason };
+    }
+    this.clearFormation();
     this.shoutTargetIds = new Set(participants.map((pet) => pet.id));
     this.shoutSequence = {
       phase: 'forming',
@@ -328,16 +468,32 @@ class BehaviorEngine {
   kneelingRowTargets(participants, display = null) {
     if (!participants.length) return new Map();
     const size = this.config.render.spriteSize;
+    const windowSize = this.config.render.windowSize;
     const activeDisplay = display || this.getDisplayForPoint({ x: participants[0].x + size / 2, y: participants[0].y + size / 2 });
-    const gap = Math.max(8, size * 0.08);
-    const totalWidth = participants.length * size + (participants.length - 1) * gap;
-    const left = activeDisplay.workArea.x + Math.max(0, (activeDisplay.workArea.width - totalWidth) / 2);
-    const windowPadding = Math.max(0, (this.config.render.windowSize - size) / 2);
-    const top = activeDisplay.workArea.y + activeDisplay.workArea.height - size - windowPadding - Math.max(24, size * 0.22);
-    return new Map(participants.map((pet, index) => [pet.id, {
-      x: left + index * (size + gap),
-      y: top
-    }]));
+    const workArea = activeDisplay.workArea;
+    const windowGap = Math.max(8, windowSize * 0.08);
+    const bodyGap = Math.max(12, size * 0.12);
+    const maxColumns = Math.max(1, Math.floor((workArea.width + windowGap) / (windowSize + windowGap)));
+    const rows = [];
+    for (let index = 0; index < participants.length; index += maxColumns) {
+      rows.push(participants.slice(index, index + maxColumns));
+    }
+    const windowPadding = Math.max(0, (windowSize - size) / 2);
+    const bottomMargin = Math.max(24, size * 0.22);
+    const rowsHeight = rows.length * windowSize + Math.max(0, rows.length - 1) * windowGap;
+    const queueTop = workArea.y + workArea.height - bottomMargin - rowsHeight;
+    const targets = new Map();
+    rows.forEach((row, rowIndex) => {
+      const rowWidth = row.length * size + Math.max(0, row.length - 1) * bodyGap;
+      const rowLeft = workArea.x + (workArea.width - rowWidth) / 2;
+      row.forEach((pet, columnIndex) => {
+        targets.set(pet.id, {
+          x: rowLeft + columnIndex * (size + bodyGap),
+          y: queueTop + rowIndex * (windowSize + windowGap) + windowPadding
+        });
+      });
+    });
+    return targets;
   }
 
   groupShoutTargets(participants, recipient) {
@@ -345,29 +501,39 @@ class BehaviorEngine {
     const focus = recipient || participants[0];
     const activeDisplay = this.getDisplayForPoint({ x: focus.x + size / 2, y: focus.y + size / 2 });
     const participantTargets = this.kneelingRowTargets(participants, activeDisplay);
-    if (!recipient) return { participantTargets, recipientTarget: null };
-    const rowTarget = participantTargets.values().next().value;
-    const windowPadding = Math.max(0, (this.config.render.windowSize - size) / 2);
-    const verticalGap = Math.max(16, size * 0.18);
+    const windowSize = this.config.render.windowSize;
+    const windowPadding = Math.max(0, (windowSize - size) / 2);
+    const targetFits = (target) => {
+      const left = target.x - windowPadding;
+      const top = target.y - windowPadding;
+      return left >= activeDisplay.workArea.x &&
+        top >= activeDisplay.workArea.y &&
+        left + windowSize <= activeDisplay.workArea.x + activeDisplay.workArea.width &&
+        top + windowSize <= activeDisplay.workArea.y + activeDisplay.workArea.height;
+    };
+    if ([...participantTargets.values()].some((target) => !targetFits(target))) {
+      return { participantTargets: new Map(), recipientTarget: null, skippedReason: 'insufficient-work-area' };
+    }
+    if (!recipient) return { participantTargets, recipientTarget: null, skippedReason: null };
+    const firstRowVisibleTop = Math.min(...participantTargets.values().map((target) => target.y));
+    const verticalGap = Math.max(48, size * 0.48);
+    const recipientTarget = {
+      x: activeDisplay.workArea.x + (activeDisplay.workArea.width - size) / 2,
+      y: firstRowVisibleTop - size - verticalGap
+    };
+    if (!targetFits(recipientTarget)) {
+      return { participantTargets: new Map(), recipientTarget: null, skippedReason: 'insufficient-work-area' };
+    }
     return {
       participantTargets,
-      recipientTarget: {
-        x: activeDisplay.workArea.x + (activeDisplay.workArea.width - size) / 2,
-        y: Math.max(activeDisplay.workArea.y + windowPadding, rowTarget.y - size - verticalGap)
-      }
+      recipientTarget,
+      skippedReason: null
     };
   }
 
   moveShoutActor(pet, target, gatherSpeed, dt, standing) {
     const deltaX = target.x - pet.x;
-    const deltaY = target.y - pet.y;
-    const remaining = Math.hypot(deltaX, deltaY);
-    const step = Math.min(remaining, gatherSpeed * dt);
-    const ratio = remaining > 0 ? step / remaining : 0;
-    pet.x += deltaX * ratio;
-    pet.y += deltaY * ratio;
-    pet.vx = dt > 0 ? deltaX * ratio / dt : 0;
-    pet.vy = dt > 0 ? deltaY * ratio / dt : 0;
+    const arrived = this.moveActorToward(pet, target, dt, { maxSpeed: Math.min(gatherSpeed, this.motionSettings().maxSpeed) });
     if (Math.abs(deltaX) >= 0.01) pet.direction = deltaX > 0 ? 'right' : 'left';
     pet.action = standing
       ? (pet.direction === 'right' ? 'idle_right' : 'idle_left')
@@ -376,7 +542,7 @@ class BehaviorEngine {
     pet.phrase = '';
     pet.phraseUntil = 0;
     pet.dragging = false;
-    return remaining - step <= 0.01;
+    return arrived;
   }
 
   holdShoutRecipient(sequence) {
@@ -389,6 +555,7 @@ class BehaviorEngine {
       frame: 0,
       phrase: '',
       phraseUntil: 0,
+      shoutRecipient: true,
       dragging: false
     });
   }
@@ -458,7 +625,6 @@ class BehaviorEngine {
     for (const pet of sequence.participants) {
       pet.vx = 0;
       pet.vy = 0;
-      pet.direction = 'right';
       pet.action = 'shout';
       pet.frame = frame;
       pet.phrase = sequence.phrase;
@@ -480,6 +646,7 @@ class BehaviorEngine {
       pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
     });
     if (recipient) {
+      recipient.shoutRecipient = false;
       recipient.phrase = '';
       recipient.phraseUntil = 0;
       recipient.vx = 0;
@@ -488,37 +655,153 @@ class BehaviorEngine {
     }
   }
 
-  arrangeCentipedeRow(participants, display = null) {
-    if (!participants.length) return;
+  centipedeRowTargets(participants, display = null) {
+    if (!participants.length) return { targets: new Map(), skippedReason: 'no-eligible-participants' };
     const size = this.config.render.spriteSize;
     const activeDisplay = display || this.getDisplayForPoint({ x: participants[0].x + size / 2, y: participants[0].y + size / 2 });
-    participants.forEach((pet) => {
-      pet.direction = 'right';
-      pet.vx = 0;
-      pet.vy = 0;
-      pet.dragging = false;
-    });
-    participants[0].x = 0;
-    participants[0].y = 0;
-    for (let index = 1; index < participants.length; index += 1) {
-      const previous = participants[index - 1];
-      const pet = participants[index];
+    const staged = this.stagedCentipede(participants);
+    const extents = this.centipedeWindowExtents(staged);
+    if (extents.width > activeDisplay.workArea.width || extents.height > activeDisplay.workArea.height) {
+      return { targets: new Map(), skippedReason: 'insufficient-work-area' };
+    }
+    const centeredLeft = activeDisplay.workArea.x + (activeDisplay.workArea.width - extents.width) / 2;
+    const desiredBottom = activeDisplay.workArea.y + activeDisplay.workArea.height - Math.max(24, size * 0.22);
+    const lowestSafeBottom = activeDisplay.workArea.y + extents.height;
+    const fittedBottom = clamp(desiredBottom, lowestSafeBottom, activeDisplay.workArea.y + activeDisplay.workArea.height);
+    const dx = centeredLeft - extents.minX;
+    const dy = fittedBottom - extents.maxY;
+    return {
+      targets: new Map(staged.map((pet) => [pet.id, { x: pet.x + dx, y: pet.y + dy, direction: 'right' }])),
+      skippedReason: null
+    };
+  }
+
+  stagedCentipede(participants) {
+    const size = this.config.render.spriteSize;
+    const staged = participants.map((pet) => ({ ...pet, x: 0, y: 0, direction: 'right' }));
+    const connectionOverlap = Math.max(3, size * 0.04);
+    for (let index = 1; index < staged.length; index += 1) {
+      const previous = staged[index - 1];
+      const pet = staged[index];
       const rear = this.anchorPoint(previous, 'rear');
       const mouth = this.anchorsFor(pet, 'right').mouth || this.anchorsFor(pet, 'right').head;
-      pet.x = rear.x - mouth[0] * size;
+      pet.x = rear.x - mouth[0] * size + connectionOverlap;
       pet.y = rear.y - mouth[1] * size;
     }
-    const minX = Math.min(...participants.map((pet) => pet.x));
-    const maxX = Math.max(...participants.map((pet) => pet.x + size));
-    const minY = Math.min(...participants.map((pet) => pet.y));
-    const maxY = Math.max(...participants.map((pet) => pet.y + size));
-    const dx = activeDisplay.workArea.x + Math.max(0, (activeDisplay.workArea.width - (maxX - minX)) / 2) - minX;
-    const dy = activeDisplay.workArea.y + activeDisplay.workArea.height - (maxY - minY) - Math.max(24, size * 0.22) - minY;
-    participants.forEach((pet) => {
-      pet.x += dx;
-      pet.y += dy;
-      pet.action = 'centipede_right';
-    });
+    return staged;
+  }
+
+  stagedPoopChaseRow(participants) {
+    const size = this.config.render.spriteSize;
+    const staged = participants.map((pet) => ({ ...pet, x: 0, y: 0, direction: 'right' }));
+    const connectionOverlap = Math.max(3, size * 0.04);
+    for (let index = 1; index < staged.length; index += 1) {
+      const previous = staged[index - 1];
+      const pet = staged[index];
+      const rear = this.anchorPoint(previous, 'rear');
+      const mouth = this.anchorsFor(pet, 'right').mouth || this.anchorsFor(pet, 'right').head;
+      pet.x = rear.x - mouth[0] * size + connectionOverlap;
+      pet.y = 0;
+    }
+    return staged;
+  }
+
+  centipedeWindowExtents(staged) {
+    const rects = staged.map((pet) => this.petWindowRect(pet));
+    const minX = Math.min(...rects.map((rect) => rect.left));
+    const maxX = Math.max(...rects.map((rect) => rect.right));
+    const minY = Math.min(...rects.map((rect) => rect.top));
+    const maxY = Math.max(...rects.map((rect) => rect.bottom));
+    return {
+      minX,
+      maxX,
+      minY,
+      maxY,
+      width: maxX - minX,
+      height: maxY - minY
+    };
+  }
+
+  clampLeaderForConnectedFormation(target, participants, display, layout = 'centipede') {
+    const staged = layout === 'poopChase'
+      ? this.stagedPoopChaseRow(participants)
+      : this.stagedCentipede(participants);
+    const extents = this.centipedeWindowExtents(staged);
+    const workArea = display.workArea;
+    return {
+      x: clamp(target.x, workArea.x - extents.minX, workArea.x + workArea.width - extents.maxX),
+      y: clamp(target.y, workArea.y - extents.minY, workArea.y + workArea.height - extents.maxY)
+    };
+  }
+
+  arrangeCentipedeRow(participants, display = null) {
+    const formation = this.centipedeRowTargets(participants, display);
+    if (formation.skippedReason) return formation;
+    for (const pet of participants) {
+      const target = formation.targets.get(pet.id);
+      Object.assign(pet, target, { vx: 0, vy: 0, dragging: false, action: 'centipede_right' });
+    }
+    return formation;
+  }
+
+  beginFormationTransition(kind, participants, targets) {
+    const fixedPoopDirection = kind === 'self-poop' || kind === 'cursor-poop';
+    this.formationTransition = {
+      kind,
+      participantIds: participants.map((pet) => pet.id),
+      targets,
+      startedAt: this.elapsed
+    };
+    for (const pet of participants) {
+      const target = targets.get(pet.id);
+      if (fixedPoopDirection && target) pet.direction = target.direction === 'left' ? 'left' : 'right';
+      pet.dragging = false;
+      pet.phrase = '';
+      pet.phraseUntil = 0;
+    }
+  }
+
+  updateFormationTransition(dt) {
+    const transition = this.formationTransition;
+    if (!transition) return true;
+    const fixedPoopDirection = transition.kind === 'self-poop' || transition.kind === 'cursor-poop';
+    let allArrived = true;
+    for (const id of transition.participantIds) {
+      const pet = this.pets.find((item) => item.id === id);
+      const target = transition.targets.get(id);
+      if (!pet || !target) continue;
+      const deltaX = target.x - pet.x;
+      if (fixedPoopDirection) pet.direction = target.direction === 'left' ? 'left' : 'right';
+      else if (Math.abs(deltaX) >= 0.01) pet.direction = deltaX > 0 ? 'right' : 'left';
+      if (!this.moveActorToward(pet, target, dt)) allArrived = false;
+      if (transition.kind === 'shout-recipient') pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
+      else pet.action = pet.direction === 'right' ? 'crawl_right' : 'crawl_left';
+      pet.frame = 0;
+      pet.effect = '';
+      pet.dragging = false;
+    }
+    if (allArrived) {
+      const exactPoopRow = transition.kind === 'self-poop' || transition.kind === 'cursor-poop';
+      for (const id of transition.participantIds) {
+        const pet = this.pets.find((item) => item.id === id);
+        const target = transition.targets.get(id);
+        if (!pet || !target) continue;
+        if (exactPoopRow) {
+          pet.x = target.x;
+          pet.y = target.y;
+        }
+        pet.direction = target.direction === 'left' ? 'left' : 'right';
+        pet.vx = 0;
+        pet.vy = 0;
+      }
+      this.formationTransition = null;
+    }
+    return allArrived;
+  }
+
+  centipedeParticipants() {
+    const selfId = this.config.selection?.userCharacterId;
+    return selfId ? this.pets.filter((pet) => pet.id !== selfId) : [...this.pets];
   }
 
   toggleCentipede(cursor = null) {
@@ -531,26 +814,40 @@ class BehaviorEngine {
     }
 
     this.clearFormation();
+    const participants = this.centipedeParticipants();
+    if (!participants.length) return this.mode;
+    const display = this.getDisplayForPoint(cursor || participants[0]);
+    const formation = this.centipedeRowTargets(participants, display);
+    if (formation.skippedReason) return this.mode;
     this.mode = 'centipede';
-    const display = this.getDisplayForPoint(cursor || this.pets[0]);
-    this.arrangeCentipedeRow(this.pets, display);
+    this.beginFormationTransition('centipede', participants, formation.targets);
+    const participantIds = new Set(participants.map((pet) => pet.id));
+    this.pets.forEach((pet) => {
+      if (participantIds.has(pet.id)) return;
+      pet.vx = 0;
+      pet.vy = 0;
+      pet.effect = '';
+      pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
+    });
     return this.mode;
   }
 
   poopChaseParticipants() {
     const settings = this.behaviors.poopChase || {};
-    const leader = this.pets.find((pet) => pet.id === settings.leaderId);
+    const selfId = this.config.selection?.userCharacterId;
+    const configuredIds = [settings.leaderId, ...(settings.followerIds || [])];
+    const leader = this.pets.find((pet) => pet.id === (selfId || settings.leaderId));
     const seen = new Set();
-    const followers = (settings.followerIds || [])
-      .filter((id) => id !== settings.leaderId && !seen.has(id) && seen.add(id))
+    const followers = [...configuredIds, ...this.pets.map((pet) => pet.id)]
+      .filter((id) => id !== leader?.id && !seen.has(id) && seen.add(id))
       .map((id) => this.pets.find((pet) => pet.id === id))
       .filter(Boolean);
-    return { settings, leader, followers, participants: leader ? [leader, ...followers] : followers };
+    return { settings, leader, followers, participants: leader ? [leader, ...followers] : followers, hasUser: Boolean(selfId && leader) };
   }
 
   togglePoopChase(cursor = null) {
-    const { settings, leader, followers } = this.poopChaseParticipants();
-    if (!settings.enabled || !leader || !followers.length) return this.mode;
+    const { settings, leader, followers, participants, hasUser } = this.poopChaseParticipants();
+    if (!settings.enabled || !leader || (hasUser && !followers.length)) return this.mode;
     if (this.mode === 'poopChase') {
       this.mode = 'free';
       this.clearFormation();
@@ -559,57 +856,60 @@ class BehaviorEngine {
     }
 
     this.clearFormation();
-    this.mode = 'poopChase';
     const size = this.config.render.spriteSize;
     const target = this.safePoint(cursor, { x: leader.x + size / 2, y: leader.y + size / 2 });
     const display = this.getDisplayForPoint(target);
-    leader.x = display.workArea.x + display.workArea.width / 2;
-    leader.y = display.workArea.y + display.workArea.height - size - Math.max(28, size * 0.25);
-    leader.direction = 'right';
-    this.arrangePoopChaseRow([leader, ...followers], settings, display);
-    this.poopRelay = { sourceIndex: 0, phase: 'waitingDrop', phaseUntil: this.elapsed };
-    this.createRelayDropping(settings, [leader, ...followers]);
+    const formation = this.poopChaseRowTargets(participants, settings, display);
+    if (formation.skippedReason) return this.mode;
+    this.mode = 'poopChase';
+    this.beginFormationTransition(hasUser ? 'self-poop' : 'cursor-poop', participants, formation.targets);
+    if (!hasUser) {
+      this.poopRelay = { cursorControlled: true, phase: 'forming' };
+      this.updateCursorDropping(cursor, leader);
+      return this.mode;
+    }
+    this.poopRelay = {
+      cursorControlled: false,
+      fixedSource: true,
+      targetIndex: 1,
+      phase: 'forming',
+      phaseUntil: Number.POSITIVE_INFINITY
+    };
+    this.createRelayDropping(settings, participants);
+    this.poopRelay.phase = 'forming';
+    this.poopRelay.phaseUntil = Number.POSITIVE_INFINITY;
     return this.mode;
   }
 
   arrangePoopChaseRow(participants, settings, display = null) {
-    if (!participants.length) return;
-    const size = this.config.render.spriteSize;
-    const leader = participants[0];
-    const direction = leader.direction === 'left' ? 'left' : 'right';
-    leader.direction = direction;
-    leader.vx = 0;
-    leader.vy = 0;
-
-    for (let index = 1; index < participants.length; index += 1) {
-      const source = participants[index - 1];
-      const pet = participants[index];
-      const rear = this.anchorPoint(source, 'rear');
-      const anchors = this.anchorsFor(pet, direction);
-      const gapOffset = direction === 'right' ? -settings.gap : settings.gap;
-      pet.x = rear.x + gapOffset - anchors.head[0] * size;
-      pet.y = leader.y;
-      pet.direction = direction;
-      pet.vx = 0;
-      pet.vy = 0;
-      pet.dragging = false;
+    const formation = this.poopChaseRowTargets(participants, settings, display);
+    if (formation.skippedReason) return formation;
+    for (const pet of participants) {
+      const target = formation.targets.get(pet.id);
+      Object.assign(pet, target, { vx: 0, vy: 0, dragging: false });
     }
+    return formation;
+  }
 
-    const activeDisplay = display || this.getDisplayForPoint({ x: leader.x + size / 2, y: leader.y + size / 2 });
-    const minX = Math.min(...participants.map((pet) => pet.x));
-    const maxX = Math.max(...participants.map((pet) => pet.x + size));
-    const minY = Math.min(...participants.map((pet) => pet.y));
-    const maxY = Math.max(...participants.map((pet) => pet.y + size));
-    const rowWidth = maxX - minX;
-    const rowHeight = maxY - minY;
-    const targetLeft = activeDisplay.workArea.x + Math.max(0, (activeDisplay.workArea.width - rowWidth) / 2);
-    const targetTop = activeDisplay.workArea.y + activeDisplay.workArea.height - rowHeight - Math.max(28, size * 0.25);
-    const dx = targetLeft - minX;
-    const dy = targetTop - minY;
-    participants.forEach((pet) => {
-      pet.x += dx;
-      pet.y += dy;
-    });
+  poopChaseRowTargets(participants, settings, display = null) {
+    if (!participants.length) return { targets: new Map(), skippedReason: 'no-eligible-participants' };
+    const size = this.config.render.spriteSize;
+    const activeDisplay = display || this.getDisplayForPoint({ x: participants[0].x + size / 2, y: participants[0].y + size / 2 });
+    const staged = this.stagedPoopChaseRow(participants);
+    const extents = this.centipedeWindowExtents(staged);
+    if (extents.width > activeDisplay.workArea.width || extents.height > activeDisplay.workArea.height) {
+      return { targets: new Map(), skippedReason: 'insufficient-work-area' };
+    }
+    const centeredLeft = activeDisplay.workArea.x + (activeDisplay.workArea.width - extents.width) / 2;
+    const desiredBottom = activeDisplay.workArea.y + activeDisplay.workArea.height - Math.max(24, size * 0.22);
+    const lowestSafeBottom = activeDisplay.workArea.y + extents.height;
+    const fittedBottom = clamp(desiredBottom, lowestSafeBottom, activeDisplay.workArea.y + activeDisplay.workArea.height);
+    const dx = centeredLeft - extents.minX;
+    const dy = fittedBottom - extents.maxY;
+    return {
+      targets: new Map(staged.map((pet) => [pet.id, { x: pet.x + dx, y: pet.y + dy, direction: 'right' }])),
+      skippedReason: null
+    };
   }
 
   update(dt, cursor) {
@@ -656,6 +956,15 @@ class BehaviorEngine {
       pet.effect = '';
       pet.effectSize = this.config.render.effectSize;
       if (pet.dragging) return;
+      if (!this.petFitsWorkArea(pet)) {
+        const previousX = pet.x;
+        const previousY = pet.y;
+        this.moveActorToward(pet, this.nearestWorkAreaTarget(pet), dt);
+        const movedX = pet.x - previousX;
+        if (Math.abs(movedX) >= 0.25) pet.direction = movedX > 0 ? 'right' : 'left';
+        pet.action = pet.direction === 'right' ? 'crawl_right' : 'crawl_left';
+        return;
+      }
       if (shouldTurn && this.random() < 0.35) {
         const speed = this.randomBetween(this.behaviors.freeRoam.speedMin, this.behaviors.freeRoam.speedMax);
         pet.vx = (this.random() > 0.5 ? 1 : -1) * speed;
@@ -664,10 +973,8 @@ class BehaviorEngine {
       pet.x += pet.vx * dt;
       pet.y += pet.vy * dt;
       const display = this.getDisplayForPoint({ x: pet.x + size / 2, y: pet.y + size / 2 });
-      const minX = display.workArea.x;
-      const maxX = display.workArea.x + display.workArea.width - size;
-      const minY = display.workArea.y;
-      const maxY = display.workArea.y + display.workArea.height - size;
+      const bounds = this.petPositionBounds(display);
+      const { minX, maxX, minY, maxY } = bounds;
       if (pet.x <= minX || pet.x >= maxX) pet.vx *= -1;
       if (pet.y <= minY || pet.y >= maxY) pet.vy *= -1;
       pet.x = clamp(pet.x, minX, maxX);
@@ -677,7 +984,7 @@ class BehaviorEngine {
     });
   }
 
-  moveLeaderToward(leader, cursor, settings) {
+  moveLeaderToward(leader, cursor, settings, participants = [leader], layout = 'centipede') {
     const size = this.config.render.spriteSize;
     const rightHead = this.anchorsFor(leader, 'right').head;
     const leftHead = this.anchorsFor(leader, 'left').head;
@@ -686,30 +993,29 @@ class BehaviorEngine {
       x: leader.x + followAnchor.x * size,
       y: leader.y + followAnchor.y * size
     });
-    const targetX = safeCursor.x - followAnchor.x * size;
-    const targetY = safeCursor.y - followAnchor.y * size;
-    const deltaX = targetX - leader.x;
-    const deltaY = targetY - leader.y;
+    const rawTargetX = safeCursor.x - followAnchor.x * size;
+    const rawTargetY = safeCursor.y - followAnchor.y * size;
+    const deltaX = rawTargetX - leader.x;
+    const deltaY = rawTargetY - leader.y;
     const desiredDistance = Math.hypot(deltaX, deltaY);
     const deadZone = settings.deadZone || 0;
-    if (desiredDistance <= deadZone || settings.dt <= 0) {
-      leader.vx = 0;
-      leader.vy = 0;
-      return { movedX: 0, movedY: 0, moving: false };
-    }
     const previousX = leader.x;
     const previousY = leader.y;
-    const maxStep = settings.maxSpeed * settings.dt;
-    const smoothStep = 1 - Math.exp(-settings.followStrength * settings.dt);
-    const wantedStep = Math.max(0, desiredDistance - deadZone) * smoothStep;
-    const ratio = desiredDistance > 0 ? Math.min(wantedStep, maxStep) / desiredDistance : 0;
-    leader.x += deltaX * ratio;
-    leader.y += deltaY * ratio;
-    this.clampPet(leader);
+    const stopRatio = desiredDistance > 0 ? Math.max(0, desiredDistance - deadZone) / desiredDistance : 0;
+    const unconstrainedTarget = desiredDistance <= deadZone
+      ? { x: leader.x, y: leader.y }
+      : { x: leader.x + deltaX * stopRatio, y: leader.y + deltaY * stopRatio };
+    const targetDisplay = this.getDisplayForPoint(safeCursor);
+    const target = this.clampLeaderForConnectedFormation(unconstrainedTarget, participants, targetDisplay, layout);
+    const shared = this.motionSettings();
+    this.moveActorToward(leader, target, settings.dt, {
+      maxSpeed: Math.min(finite(settings.maxSpeed) && settings.maxSpeed > 0 ? settings.maxSpeed : shared.maxSpeed, shared.maxSpeed),
+      maxAcceleration: finite(settings.maxAcceleration) && settings.maxAcceleration > 0
+        ? Math.min(settings.maxAcceleration, shared.maxAcceleration)
+        : shared.maxAcceleration
+    });
     const movedX = leader.x - previousX;
     const movedY = leader.y - previousY;
-    leader.vx = movedX / settings.dt;
-    leader.vy = movedY / settings.dt;
     if (Math.abs(movedX) >= 0.25) leader.direction = movedX > 0 ? 'right' : 'left';
     return { movedX, movedY, moving: Math.hypot(movedX, movedY) >= 0.1 };
   }
@@ -722,7 +1028,25 @@ class BehaviorEngine {
       y: leader.y + anchors.rear[1] * size,
       direction: leader.direction
     };
-    if (!this.trail.length || distance(this.trail[0], rear) >= 2) this.trail.unshift(rear);
+    const sampleDistance = this.motionSettings().trailSampleDistance;
+    if (!this.trail.length) this.trail.push(rear, { ...rear });
+    else {
+      const newestFixedSample = this.trail[1] || this.trail[0];
+      const segment = distance(newestFixedSample, rear);
+      if (segment >= sampleDistance) {
+        const steps = Math.floor(segment / sampleDistance);
+        const fixedSamples = [];
+        for (let step = 1; step <= steps; step += 1) {
+          const ratio = Math.min(1, step * sampleDistance / segment);
+          fixedSamples.push({
+            x: newestFixedSample.x + (rear.x - newestFixedSample.x) * ratio,
+            y: newestFixedSample.y + (rear.y - newestFixedSample.y) * ratio,
+            direction: rear.x >= newestFixedSample.x ? 'right' : 'left'
+          });
+        }
+        this.trail = [rear, ...fixedSamples.reverse(), ...this.trail.slice(1)];
+      } else this.trail[0] = rear;
+    }
     return { rear, anchors };
   }
 
@@ -738,62 +1062,132 @@ class BehaviorEngine {
 
   updateCentipede(dt, cursor) {
     const settings = this.behaviors.centipede;
-    const leader = this.pets[0];
+    const participants = this.centipedeParticipants();
+    if (this.formationTransition) {
+      if (!this.updateFormationTransition(dt)) return;
+      if (participants[0]) this.initializeTrail(participants[0], participants.length);
+    }
+    this.updateCentipedeParticipants(participants, dt, cursor, settings);
+    const participantIds = new Set(participants.map((pet) => pet.id));
+    for (const pet of this.pets) {
+      if (participantIds.has(pet.id)) continue;
+      pet.vx = 0;
+      pet.vy = 0;
+      pet.effect = '';
+      pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
+    }
+  }
+
+  updateCentipedeParticipants(participants, dt, cursor, settings = this.behaviors.centipede) {
+    const leader = participants[0];
     if (!leader) return;
     const size = this.config.render.spriteSize;
-    const before = this.pets.map((pet) => ({ x: pet.x, y: pet.y }));
-    const display = this.getDisplayForPoint({ x: leader.x + size / 2, y: leader.y + size / 2 });
-    const movement = this.moveLeaderToward(leader, cursor, { ...settings, dt });
-    const minX = Math.min(...before.map((pet) => pet.x));
-    const maxX = Math.max(...before.map((pet) => pet.x + size));
-    const minY = Math.min(...before.map((pet) => pet.y));
-    const maxY = Math.max(...before.map((pet) => pet.y + size));
-    const movedX = clamp(movement.movedX, display.workArea.x - minX, display.workArea.x + display.workArea.width - maxX);
-    const movedY = clamp(movement.movedY, display.workArea.y - minY, display.workArea.y + display.workArea.height - maxY);
-    for (let index = 0; index < this.pets.length; index += 1) {
-      const pet = this.pets[index];
-      pet.x = before[index].x + movedX;
-      pet.y = before[index].y + movedY;
+    this.moveLeaderToward(leader, cursor, { ...settings, dt }, participants);
+    this.updateTrailFromLeader(leader);
+    const connectionOverlap = Math.max(3, size * 0.04);
+    let connectionPoint = sampleTrail(this.trail, 0);
+    for (let index = 1; index < participants.length; index += 1) {
+      const pet = participants[index];
+      const direction = pet.direction === 'left' ? 'left' : 'right';
+      const anchors = this.anchorsFor(pet, direction);
+      const mouth = anchors.mouth || anchors.head;
+      const overlapOffset = direction === 'right' ? connectionOverlap : -connectionOverlap;
+      const target = {
+        x: connectionPoint.x - mouth[0] * size + overlapOffset,
+        y: connectionPoint.y - mouth[1] * size
+      };
+      const maxStep = this.motionSettings().maxSpeed * dt;
+      const deltaX = target.x - pet.x;
+      const deltaY = target.y - pet.y;
+      const stepDistance = Math.hypot(deltaX, deltaY);
+      const ratio = stepDistance > maxStep && stepDistance > 0 ? maxStep / stepDistance : 1;
+      const movedX = deltaX * ratio;
+      const movedY = deltaY * ratio;
+      pet.x += movedX;
+      pet.y += movedY;
       pet.vx = dt > 0 ? movedX / dt : 0;
       pet.vy = dt > 0 ? movedY / dt : 0;
-      pet.direction = 'right';
-      pet.action = 'centipede_right';
-      pet.effect = index === this.pets.length - 1 && settings.flies && this.behaviors.prankEffects.enabled ? 'flies' : '';
+      connectionPoint = this.anchorPoint(pet, 'rear');
+    }
+    this.trimTrail(Math.max(300, (participants.length + 2) * size * 1.4));
+    for (let index = 0; index < participants.length; index += 1) {
+      const pet = participants[index];
+      pet.action = `centipede_${pet.direction}`;
+      pet.effect = index === participants.length - 1 && settings.flies && this.behaviors.prankEffects.enabled ? 'flies' : '';
       pet.effectSize = this.config.render.effectSize;
+      pet.phrase = index === 0 && !this.config.selection?.userCharacterId ? '别跑！' : '';
+      pet.phraseUntil = index === 0 && !this.config.selection?.userCharacterId ? Number.POSITIVE_INFINITY : 0;
       pet.dragging = false;
     }
   }
 
+  updatePoopChaseParticipants(participants, dt, cursor, settings) {
+    const leader = participants[0];
+    if (!leader) return;
+    const { movedX, movedY } = this.moveLeaderToward(
+      leader,
+      cursor,
+      { ...settings, dt },
+      participants,
+      'poopChase'
+    );
+    for (let index = 1; index < participants.length; index += 1) {
+      const pet = participants[index];
+      pet.x += movedX;
+      pet.y += movedY;
+      pet.vx = leader.vx;
+      pet.vy = leader.vy;
+      pet.direction = leader.direction;
+    }
+  }
+
   updatePoopChase(dt, cursor) {
-    const { settings, leader, followers, participants } = this.poopChaseParticipants();
-    if (!settings.enabled || !leader || !followers.length) {
+    const { settings, leader, followers, participants, hasUser } = this.poopChaseParticipants();
+    if (!settings.enabled || !leader || (hasUser && !followers.length)) {
       this.mode = 'free';
       this.clearFormation();
       return;
     }
 
-    const size = this.config.render.spriteSize;
-    const before = new Map(participants.map((pet) => [pet.id, { x: pet.x, y: pet.y }]));
-    const display = this.getDisplayForPoint({ x: leader.x + size / 2, y: leader.y + size / 2 });
-    const movement = this.moveLeaderToward(leader, cursor, { ...settings, dt });
-    const minX = Math.min(...participants.map((pet) => before.get(pet.id).x));
-    const maxX = Math.max(...participants.map((pet) => before.get(pet.id).x + size));
-    const minY = Math.min(...participants.map((pet) => before.get(pet.id).y));
-    const maxY = Math.max(...participants.map((pet) => before.get(pet.id).y + size));
-    const movedX = clamp(movement.movedX, display.workArea.x - minX, display.workArea.x + display.workArea.width - maxX);
-    const movedY = clamp(movement.movedY, display.workArea.y - minY, display.workArea.y + display.workArea.height - maxY);
-    for (const pet of participants) {
-      const original = before.get(pet.id);
-      pet.x = original.x + movedX;
-      pet.y = original.y + movedY;
-      pet.vx = dt > 0 ? movedX / dt : 0;
-      pet.vy = dt > 0 ? movedY / dt : 0;
-      pet.direction = leader.direction;
+    if (!hasUser) {
+      this.updateCursorDropping(cursor, leader, dt);
+      if (this.formationTransition) {
+        if (!this.updateFormationTransition(dt)) return;
+        this.poopRelay.phase = 'active';
+      }
+      const cursorPoop = this.droppings[0] || this.safePoint(cursor, this.anchorPoint(leader, 'head'));
+      const cursorSettings = {
+        ...this.behaviors.centipede,
+        maxSpeed: Math.min(settings.maxSpeed || this.behaviors.centipede.maxSpeed, this.behaviors.centipede.maxSpeed),
+        maxAcceleration: settings.maxAcceleration || this.behaviors.centipede.maxAcceleration
+      };
+      this.updatePoopChaseParticipants(participants, dt, cursorPoop, cursorSettings);
+      for (let index = 0; index < participants.length; index += 1) {
+        const pet = participants[index];
+        pet.action = `centipede_${pet.direction}`;
+        pet.effect = index === participants.length - 1 && cursorSettings.flies && this.behaviors.prankEffects.enabled ? 'flies' : '';
+        pet.effectSize = this.config.render.effectSize;
+        pet.phrase = index === 0 ? '别跑！' : '';
+        pet.phraseUntil = index === 0 ? Number.POSITIVE_INFINITY : 0;
+        pet.dragging = false;
+      }
+      return;
     }
-    for (const dropping of this.droppings) {
-      dropping.x += movedX;
-      dropping.y += movedY;
+
+    if (this.formationTransition) {
+      const gathered = this.updateFormationTransition(dt);
+      const formingDropping = this.droppings[0];
+      if (formingDropping) {
+        const point = this.anchorPoint(leader, 'rear');
+        Object.assign(formingDropping, { x: point.x, y: point.y, vx: leader.vx, vy: leader.vy });
+      }
+      leader.action = `poop_${leader.direction}`;
+      if (!gathered) return;
+      this.poopRelay.phase = 'sourceHold';
+      this.poopRelay.phaseUntil = this.elapsed + Math.max(0, settings.initialDropDelayMs || settings.dropVisibleBeforeEatMs || 0) / 1000;
+      this.poopRelay.lastUpdatedAt = this.elapsed;
     }
+    this.updatePoopChaseParticipants(participants, dt, cursor, settings);
 
     const participantIds = new Set([leader.id, ...followers.map((pet) => pet.id)]);
     for (const pet of this.pets) {
@@ -803,14 +1197,95 @@ class BehaviorEngine {
     }
 
     this.updatePoopRelay(settings, participants);
-    const activeSource = participants[this.poopRelay?.sourceIndex || 0];
+    const relay = this.poopRelay;
+    const activeSource = participants[0];
+    const nextEater = participants[relay?.targetIndex || 1] || null;
     for (const pet of participants) {
       const eating = this.elapsed < pet.eatUntil;
-      pet.action = eating ? `eat_${pet.direction}` : (pet.id === activeSource?.id ? `poop_${pet.direction}` : `eat_${pet.direction}`);
+      const waitingToEat = !eating && pet.id === nextEater?.id &&
+        (relay?.phase === 'sourceHold' || relay?.phase === 'travelling');
+      if (relay?.fixedSource && pet.id === activeSource?.id) pet.action = `poop_${pet.direction}`;
+      else if (eating || pet.id === nextEater?.id) pet.action = `eat_${pet.direction}`;
+      else pet.action = `crawl_${pet.direction}`;
       pet.effect = eating && this.behaviors.prankEffects.enabled ? 'stink' : '';
       pet.effectSize = eating ? settings.stinkSize : this.config.render.effectSize;
+      pet.phrase = eating ? '啊呜！' : waitingToEat ? '下一个！' : '';
+      pet.phraseUntil = eating ? pet.eatUntil : 0;
       pet.dragging = false;
     }
+  }
+
+  moveDroppingToward(dropping, target, dt, maxSpeed, maxAcceleration) {
+    const safeDt = finite(dt) ? Math.max(0, Math.min(0.1, dt)) : 0;
+    if (safeDt <= 0) return distance(dropping, target) <= 0.5;
+    const deltaX = target.x - dropping.x;
+    const deltaY = target.y - dropping.y;
+    const remaining = Math.hypot(deltaX, deltaY);
+    const currentVx = finite(dropping.vx) ? dropping.vx : 0;
+    const currentVy = finite(dropping.vy) ? dropping.vy : 0;
+    const safeSpeed = finite(maxSpeed) && maxSpeed > 0 ? maxSpeed : 120;
+    const safeAcceleration = finite(maxAcceleration) && maxAcceleration > 0 ? maxAcceleration : safeSpeed * 2;
+    const desiredSpeed = Math.min(safeSpeed, Math.sqrt(Math.max(0, 2 * safeAcceleration * remaining)));
+    const desiredVx = remaining > 0 ? deltaX / remaining * desiredSpeed : 0;
+    const desiredVy = remaining > 0 ? deltaY / remaining * desiredSpeed : 0;
+    const deltaVx = desiredVx - currentVx;
+    const deltaVy = desiredVy - currentVy;
+    const deltaV = Math.hypot(deltaVx, deltaVy);
+    const accelerationStep = safeAcceleration * safeDt;
+    const accelerationRatio = deltaV > accelerationStep && deltaV > 0 ? accelerationStep / deltaV : 1;
+    let nextVx = currentVx + deltaVx * accelerationRatio;
+    let nextVy = currentVy + deltaVy * accelerationRatio;
+    const nextSpeed = Math.hypot(nextVx, nextVy);
+    if (nextSpeed > safeSpeed) {
+      nextVx *= safeSpeed / nextSpeed;
+      nextVy *= safeSpeed / nextSpeed;
+    }
+    let stepX = nextVx * safeDt;
+    let stepY = nextVy * safeDt;
+    if (stepX * deltaX + stepY * deltaY > 0 && Math.hypot(stepX, stepY) > remaining) {
+      stepX = deltaX;
+      stepY = deltaY;
+      nextVx = stepX / safeDt;
+      nextVy = stepY / safeDt;
+    }
+    dropping.x += stepX;
+    dropping.y += stepY;
+    dropping.vx = nextVx;
+    dropping.vy = nextVy;
+    return remaining <= 0.5 && Math.hypot(nextVx, nextVy) <= accelerationStep + 0.01;
+  }
+
+  updateCursorDropping(cursor, leader, dt = 0) {
+    const fallback = this.anchorPoint(leader, 'head');
+    const point = this.safePoint(cursor, fallback);
+    let dropping = this.droppings.find((item) => item.id === 'cursor-poop');
+    if (!dropping) {
+      dropping = {
+        id: 'cursor-poop',
+        x: point.x,
+        y: point.y,
+        vx: 0,
+        vy: 0,
+        sourceId: null,
+        targetId: null,
+        cursorControlled: true,
+        createdAt: this.elapsed,
+        edibleAt: Number.POSITIVE_INFINITY,
+        approachedTarget: false,
+        eatenBy: [],
+        consumedAt: null
+      };
+      this.droppings = [dropping];
+      return;
+    }
+    const settings = this.behaviors.poopChase || {};
+    this.moveDroppingToward(
+      dropping,
+      point,
+      dt,
+      settings.cursorPoopMaxSpeed,
+      settings.maxAcceleration || this.motionSettings().maxAcceleration
+    );
   }
 
   anchorPoint(pet, kind) {
@@ -820,37 +1295,74 @@ class BehaviorEngine {
     return { x: pet.x + anchor[0] * size, y: pet.y + anchor[1] * size };
   }
 
-  createRelayDropping(settings, participants) {
-    const source = participants[this.poopRelay.sourceIndex];
-    const target = participants[this.poopRelay.sourceIndex + 1];
-    if (!source || !target) return;
+  droppingPoint(source, settings, target = null) {
+    const size = this.config.render.spriteSize;
     const rear = this.anchorPoint(source, 'rear');
+    const radius = Math.max(1, (settings.poopSize || this.config.render.effectSize || 1) / 2);
+    const display = this.getDisplayForPoint({ x: source.x + size / 2, y: source.y + size / 2 });
+    const workArea = display.workArea;
+    if (target) {
+      const mouth = this.anchorPoint(target, 'mouth');
+      return {
+        x: clamp((rear.x + mouth.x) / 2, workArea.x + radius, workArea.x + workArea.width - radius),
+        y: clamp((rear.y + mouth.y) / 2, workArea.y + radius, workArea.y + workArea.height - radius)
+      };
+    }
+    const clearance = Math.max(radius + 2, size * 0.1);
+    const desiredX = source.direction === 'left'
+      ? Math.max(rear.x + clearance, source.x + size + 2)
+      : Math.min(rear.x - clearance, source.x - 2);
+    return {
+      x: clamp(desiredX, workArea.x + radius, workArea.x + workArea.width - radius),
+      y: clamp(rear.y + size * 0.12, workArea.y + radius, workArea.y + workArea.height - radius)
+    };
+  }
+
+  eatingContactPoint(source, target, settings) {
+    const mouth = this.anchorPoint(target, 'mouth');
+    const radius = Math.max(1, (settings.poopSize || this.config.render.effectSize || 1) / 2);
+    const forwardSign = target.direction === 'left' ? -1 : 1;
+    const contactOffset = radius * 0.92;
+    return {
+      x: mouth.x + forwardSign * contactOffset,
+      y: mouth.y
+    };
+  }
+
+  createRelayDropping(settings, participants) {
+    const source = participants[0];
+    const targetIndex = finite(this.poopRelay?.targetIndex) ? this.poopRelay.targetIndex : 1;
+    const target = participants[targetIndex];
+    if (!source || !target) return;
+    const point = this.anchorPoint(source, 'rear');
     source.poopUntil = this.elapsed + Math.max(settings.poopDurationMs, settings.dropVisibleBeforeEatMs + settings.eatDurationMs) / 1000;
     const dropping = {
       id: `poop-${this.nextDroppingId++}`,
-      x: rear.x,
-      y: rear.y + this.config.render.spriteSize * 0.12,
+      x: point.x,
+      y: point.y,
+      vx: 0,
+      vy: 0,
       sourceId: source.id,
       targetId: target.id,
       createdAt: this.elapsed,
-      edibleAt: this.elapsed + settings.dropVisibleBeforeEatMs / 1000,
+      edibleAt: this.elapsed,
       approachedTarget: false,
       eatenBy: [],
       consumedAt: null
     };
-    dropping.approachedTarget = distance(this.anchorPoint(target, 'head'), dropping) <= settings.eatRadius;
     this.droppings = [dropping];
-    this.poopRelay.phase = 'waitingEat';
-    this.poopRelay.phaseUntil = Number.POSITIVE_INFINITY;
+    this.poopRelay.targetIndex = targetIndex;
+    this.poopRelay.phase = 'sourceHold';
+    this.poopRelay.phaseUntil = this.elapsed + Math.max(0, settings.initialDropDelayMs || settings.dropVisibleBeforeEatMs || 0) / 1000;
   }
 
   createTailDropping(settings, source) {
-    const rear = this.anchorPoint(source, 'rear');
+    const point = this.droppingPoint(source, settings);
     source.poopUntil = this.elapsed + settings.poopDurationMs / 1000;
     this.droppings = [{
       id: `poop-${this.nextDroppingId++}`,
-      x: rear.x,
-      y: rear.y + this.config.render.spriteSize * 0.12,
+      x: point.x,
+      y: point.y,
       sourceId: source.id,
       targetId: null,
       createdAt: this.elapsed,
@@ -866,41 +1378,65 @@ class BehaviorEngine {
   updatePoopRelay(settings, participants) {
     if (!this.poopRelay) return;
     const relay = this.poopRelay;
-    if (relay.phase === 'waitingDrop' && this.elapsed >= relay.phaseUntil) {
-      this.createRelayDropping(settings, participants);
+    if (relay.cursorControlled || relay.phase === 'forming') return;
+    const dropping = this.droppings[0];
+    const source = participants[0];
+    if (!dropping || !source) return;
+    const relaySpeed = finite(settings.relaySpeed) && settings.relaySpeed > 0 ? settings.relaySpeed : 120;
+    const relayAcceleration = finite(settings.maxAcceleration) && settings.maxAcceleration > 0
+      ? settings.maxAcceleration
+      : this.motionSettings().maxAcceleration;
+    const dt = finite(relay.lastUpdatedAt) ? Math.max(0, Math.min(0.1, this.elapsed - relay.lastUpdatedAt)) : 0;
+    relay.lastUpdatedAt = this.elapsed;
+
+    if (relay.phase === 'sourceHold') {
+      this.moveDroppingToward(dropping, this.anchorPoint(source, 'rear'), dt, relaySpeed, relayAcceleration);
+      if (this.elapsed >= relay.phaseUntil) relay.phase = 'travelling';
       return;
     }
-    if (relay.phase === 'waitingEat') {
-      const dropping = this.droppings[0];
-      const target = participants[relay.sourceIndex + 1];
-      if (!dropping || !target) return;
-      if (this.elapsed - dropping.createdAt >= settings.droppingTtlMs / 1000) {
-        this.createRelayDropping(settings, participants);
-        return;
-      }
-      if (distance(this.anchorPoint(target, 'head'), dropping) <= settings.eatRadius) dropping.approachedTarget = true;
-      if (this.elapsed < dropping.edibleAt || !dropping.approachedTarget) return;
-      dropping.eatenBy = [target.id];
-      dropping.consumedAt = this.elapsed;
+
+    const target = participants[relay.targetIndex];
+    if (!target) return;
+    const contact = this.eatingContactPoint(source, target, settings);
+    dropping.targetId = target.id;
+
+    if (relay.phase === 'travelling') {
+      const arrived = this.moveDroppingToward(dropping, contact, dt, relaySpeed, relayAcceleration);
+      if (!arrived) return;
+      dropping.approachedTarget = true;
+      if (!dropping.eatenBy.includes(target.id)) dropping.eatenBy.push(target.id);
       target.eatUntil = this.elapsed + settings.eatDurationMs / 1000;
-      relay.sourceIndex += 1;
-      relay.phase = 'eating';
-      relay.phaseUntil = target.eatUntil;
+      relay.phase = 'mouthHold';
+      relay.phaseUntil = this.elapsed + Math.max(settings.mouthHoldMs || 0, settings.eatDurationMs || 0) / 1000;
       return;
     }
-    if (relay.phase === 'eating') {
+
+    if (relay.phase === 'mouthHold') {
+      this.moveDroppingToward(dropping, contact, dt, relaySpeed, relayAcceleration);
       if (this.elapsed < relay.phaseUntil) return;
-      if (relay.sourceIndex >= participants.length - 1) this.createTailDropping(settings, participants[participants.length - 1]);
-      else this.createRelayDropping(settings, participants);
+      if (relay.targetIndex < participants.length - 1) {
+        relay.targetIndex += 1;
+        relay.phase = 'travelling';
+        relay.phaseUntil = Number.POSITIVE_INFINITY;
+      } else {
+        dropping.consumedAt = this.elapsed;
+        relay.phase = 'finalHold';
+        relay.phaseUntil = this.elapsed + Math.max(0, settings.consumedDelayMs || 300) / 1000;
+      }
       return;
     }
-    if (relay.phase === 'tailDrop' && this.elapsed >= relay.phaseUntil) {
+
+    if (relay.phase === 'finalHold') {
+      this.moveDroppingToward(dropping, contact, dt, relaySpeed, relayAcceleration);
+      if (this.elapsed < relay.phaseUntil) return;
       relay.phase = 'roundReset';
-      relay.phaseUntil = this.elapsed + settings.roundResetDelayMs / 1000;
+      relay.phaseUntil = this.elapsed + Math.max(0, settings.roundResetDelayMs || 0) / 1000;
       return;
     }
+
     if (relay.phase === 'roundReset' && this.elapsed >= relay.phaseUntil) {
-      relay.sourceIndex = 0;
+      relay.targetIndex = 1;
+      relay.lastUpdatedAt = this.elapsed;
       this.createRelayDropping(settings, participants);
     }
   }

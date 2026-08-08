@@ -1,35 +1,68 @@
-# Self-check and repair loop
+# 自检与修复循环
 
-Run self-check twice: after generating the action contact sheet and after capturing the runtime window plus selected scenario captures. A passing structural validator is not evidence that the character still looks right.
+自检至少运行两次：第一次在生成动作联系表后，第二次在采集运行窗口和关键场景截图后。结构验证通过，不代表人物外观仍然正确。
 
-## Automated pass
+## 自动门禁
 
-Run `scripts/self_check_project.mjs`. It writes these files under `preview/`:
+运行 `scripts/self_check_project.mjs`。它会在 `preview/` 下写入：
 
-- `self-check-report.json`: score, machine-readable findings, frame metrics, and repair actions.
-- `self-check-report.md`: short gate summary.
-- `self-check-review.json`: manual visual-review form. It is created once and never overwritten. Each character and runtime section contains an artifact fingerprint; copy the current fingerprint from the report after viewing changed assets so stale approvals cannot survive regeneration.
+- `self-check-report.json`：分数、机器可读问题、帧指标和修复建议。
+- `self-check-report.md`：简短门禁摘要。
+- `self-check-review.json`：人工视觉审核表。文件只在首次运行时创建，之后不会覆盖。每个人物和运行时部分都包含产物指纹；查看变更后的素材后，必须从报告复制当前指纹，旧批准不能沿用到重新生成的素材。
 
-The automated checks cover the GPT Image 2 workflow attestation and generated-file hashes, placeholders, incomplete base or configured role-action groups, frames shared across people or actions, stale contact/runtime screenshots, empty or clipped frames, opaque edges, weak readable scale, centering and animation drift, nearly duplicate animation frames, chroma spill, incorrect centipede anchor direction, cross-character scale mismatch, and blank runtime screenshots. The attestation is not an OpenAI-signed model receipt.
+自动检查覆盖：受支持的图像生成工作流声明和生成文件哈希（默认 GPT Image 2；经用户显式授权时允许固定的 `gpt-image-1.5` 真透明 fallback）、替换历史源文件完整性、透明修正报告及其四文件哈希、占位图、不完整基础动作或角色动作组、跨人物/动作复用帧、过期联系表或运行截图、空白或裁切帧、不透明边缘、可读尺寸不足、居中和动画漂移、动画帧近似重复、键色溢出、蜈蚣锚点方向错误、跨人物比例不一致，以及空白运行截图。工作流声明不是 OpenAI 签名的模型凭证。
 
-## Visual pass
+任何含 `transparencyRecovery.correctionReport` 的 generation manifest 条目都必须通过以下强校验，否则产生 `error`，不能降级为 warning：
 
-Use `view_image` to inspect `identity-board.png`, `action-contact-sheet.png`, `runtime-window.png`, and every selected image under `preview/scenarios/`. Fill every required field in `self-check-review.json` with `pass` or `fail`; do not leave `pending` fields before an approval or delivery.
+- 报告路径是 `preview/` 内的可移植相对路径，且报告 SHA-256 与登记值一致；
+- 报告 schema、工具版本、状态、attempt 和 key 有效；
+- 输入、自动候选、蒙版、输出四个文件都存在，路径安全，SHA-256 与报告一致；
+- 报告最终输出路径和 SHA-256 与当前母版或动作记录完全一致；
+- 历史替换链中的旧修正证据也保持完整，不得覆盖或删除。
 
-Fail a character when any of these are visible:
+## 人工视觉门禁
 
-- The face, hair, glasses, clothing, or accessories no longer match the approved identity.
-- Clothing or identity traits migrated between people.
-- A limb, hand, foot, face, or major clothing region is missing, duplicated, fused, or clipped.
-- Left/right crawl, centipede, shout, or drag poses are unreadable at contact-sheet size.
-- A configured leader's left/right poop pose is not readable without drawing poop into the person sprite.
-- A configured follower's left/right lowered-head, open-mouth eating action is not readable, or becomes graphic/realistic.
-- Key-color fringe, dirty transparency, cell bleed, inconsistent scale, or large position jumps remain.
+使用 `view_image` 查看 `identity-board.png`、`action-contact-sheet.png`、`runtime-window.png`、`runtime-window-2.png`、`runtime-paused.png`、`runtime-smoke-technical.png` 和 `preview/scenarios/` 中选定的每张图片。把 `self-check-review.json` 的所有必填项填写为 `pass` 或 `fail`；批准或交付前不得留下 `pending`。
 
-Fail runtime review when the pet is blank, clipped, too small to read, surrounded by an opaque rectangle, or rendered outside the transparent window as expected.
+`runtime-window.png` 和 `runtime-window-2.png` 使用受控脱敏背景来证明多个透明窗口经过系统桌面合成后仍然完整可见。这个背景必须标明“内部验收画布 · 非产品界面”，不能作为成品 UI、启动页或真实桌面效果展示。正常打包启动只能出现独立的透明桌宠窗口，不得创建或显示该验收画布。
 
-Fail a scenario when a human-centipede mouth is detached from the previous rear, a special formation does not visibly follow the cursor, its fixed-row offsets break while moving, the relay leaves its row, more than one dropping appears, an eater does not become the next poop source, or kneeling shouts are not synchronized. Also fail dad/grandpa when the selected self is not visibly centered as the standing recipient, overlaps the row, kneels, shouts, receives a prank bubble, or when participants do not face that recipient.
+运行时图片的权威清单是 `runtime-evidence-manifest.json`，不要从目录中挑选未被清单登记的旧截图代替。两张普通模式活动证据和一张暂停证据必须为每个预期人物记录唯一 `id`、`visible`、窗口 `bounds`、`desktopForegroundRatio` 和 `desktopMatchRatio`；暂停证据还必须显式记录 `paused: true`。技术合成图必须记录每个人物的 `alphaCoverage`。缺人、重复人物、隐藏窗口、越界、普通模式窗口重叠、桌面合成中无可读前景或技术图 alpha 不可读，均必须判失败。
 
-## Repair rule
+出现以下任一情况，人物必须判失败：
 
-Require `status: pass`, project score 90 or higher, every identity score 90 or higher, and identity similarity at least 31/35. Regenerate only the failed person/action from the approved master. Never lower thresholds to force a pass.
+- 脸、头发、眼镜、服装或配饰与已批准身份不一致；
+- 人物之间发生服装或身份特征迁移；
+- 四肢、手、脚、脸或主要服装区域缺失、重复、融合或裁切；
+- 左右爬、蜈蚣、跪喊或拖拽姿势在联系表尺寸下不可读；
+- 拉屎角色的左右姿势不清楚，或把排泄物直接画进人物精灵；
+- 吃的角色没有清楚的左右低头张嘴动作，或画面变得写实、恶心；
+- 仍有键色色边、脏透明、单元格串色、比例不一致或大幅位置跳动。
+
+本地蒙版修正不是万能去色。若颜色污染已经进入真实头发、皮肤或服装内部，必须判失败并重新生成或更换照片，不能仅凭 alpha 看似正确就放行。
+
+运行时若桌宠空白、裁切、过小不可读、带不透明矩形，或没有按预期出现在透明窗口中，必须判失败。单窗口截图、局部裁切图或仅证明窗口数量的技术合成图，不能单独证明多人物构图正确。
+
+以下场景也必须判失败：蜈蚣动作的嘴没有连接前一人的后端；特殊队形没有明显跟随目标；移动时固定行偏移被破坏；同时出现多个排泄物；跪喊不同步。有本人时，如果本人没有站立不跪、其他角色没有全部跪喊，或屎追逐不是本人持续拉、其他角色全员追吃，必须失败。没有指定本人时，如果不是全员跪喊，或鼠标没有控制点击穿透的屎、全员人形蜈蚣没有追随，也必须失败。
+
+## 搞笑程度人工门禁
+
+在所有技术和隐私字段之外，逐个特殊恶搞填写 100 分人工评分。评分必须来自完整合成运行图或真实 packaged 运行，不得只看单人物帧、JSON 或内部验收画布标签。
+
+| 维度 | 分值 | 失败信号 |
+| --- | ---: | --- |
+| 角色关系 | 25 | 看不懂谁是本人、谁跪、谁拉、谁追吃 |
+| 荒诞程度 | 20 | 梗太弱，或只是堆特效造成混乱 |
+| 动作与节奏 | 20 | 集合、跪喊、拉和追吃没有可读节拍 |
+| 队形表现 | 15 | 跪喊散乱、蜈蚣断链或追逐方向不清 |
+| 屎的可读性 | 10 | 太小看不见、太大遮脸或位置不合理 |
+| 回看欲 | 10 | 没有递进、反差或值得重看的时机感 |
+
+特殊恶搞总分低于 90 必须失败，即使 self-check 技术分达到 90 也不能交付。记录每项分数、总分、扣分原因、针对性改动和重新截图后的复评结果；不能只改总分数字。
+
+`self-check-review.json` 使用 schemaVersion 3，并在 `runtime.humor` 中保存：`contractFingerprint`、`reviews` 数组和整体 `status`。每个启用的特殊恶搞都必须在 `reviews` 中有独立条目：爸爸喊、爷爷喊和当前追逐变体（本人为 `poop-chase`、本人不在照片为 `cursor-centipede`）逐个打分，不能用一份聚合分数替全部。每个条目包含 `prankId`、来自当前该恶搞场景证据的 `evidenceRefs`（至少一张 PNG）、`roleClarity`（25）、`absurdity`（20）、`timingEscalation`（20）、`formationReadability`（15）、`poopReadability`（10）、`surpriseRewatch`（10）、严格等于六项之和的 `total`、`deductions`、`optimizations`、`reevaluationNotes` 和 `status`。
+
+六项必须为各自范围内的整数；`total` 伪造、跨场景或过期证据、无意义或零宽度的扣分/优化/复评文本、条目缺失或多出，都由自检程序直接判失败。任一条目低于 90 分即整体失败，不能靠其它条目高分弥补。运行证据或评分契约变化会改变 runtime fingerprint，旧审核不能自动沿用。
+
+## 修复规则
+
+只有同时满足以下条件才能通过：`status: pass`、项目分数不低于 90、每个身份分数不低于 90、身份相似度不低于 31/35、所有透明修正链路校验通过。只重新生成失败的人物或动作，并从已批准母版继续。禁止降低阈值来强行通过。
