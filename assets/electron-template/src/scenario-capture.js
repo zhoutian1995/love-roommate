@@ -16,6 +16,44 @@ async function boundedCaptureRetry(capture, { attempts = 3, delayMs = 60 } = {})
   throw lastError;
 }
 
+function centipedeCaptureMilestone({
+  snapshot,
+  participantIds = [],
+  leaderId,
+  captures = [],
+  elapsedMs,
+  cursor,
+  minimumEarlyElapsedMs = 350,
+  minimumSeparationMs = 300,
+  minimumTravelPx = 40
+} = {}) {
+  if (snapshot?.mode !== 'centipede' || !Number.isFinite(elapsedMs) || elapsedMs < minimumEarlyElapsedMs) return null;
+  const ids = [...new Set(participantIds.filter((id) => typeof id === 'string' && id))];
+  if (!ids.length) return null;
+  const petsById = new Map((snapshot.pets || []).map((pet) => [pet?.id, pet]));
+  if (ids.some((id) => !/^centipede_(?:left|right)$/.test(String(petsById.get(id)?.action || '')))) return null;
+  const leader = petsById.get(leaderId);
+  if (!leader || ![leader.x, leader.y, cursor?.x, cursor?.y].every(Number.isFinite)) return null;
+  const evidence = {
+    kind: 'cursor-centipede',
+    elapsedMs: Math.round(elapsedMs),
+    cursor: { x: Math.round(cursor.x), y: Math.round(cursor.y) },
+    leaderPosition: { x: Number(leader.x.toFixed(2)), y: Number(leader.y.toFixed(2)) }
+  };
+  const early = captures.find((capture) => capture?.label === 'centipede-early'
+    && capture?.evidence?.kind === 'cursor-centipede');
+  if (!early) return { label: 'centipede-early', evidence };
+  if (captures.some((capture) => capture?.label === 'centipede-late')) return null;
+  const earlyPosition = early.evidence?.leaderPosition;
+  if (![early.evidence?.elapsedMs, earlyPosition?.x, earlyPosition?.y].every(Number.isFinite)) return null;
+  if (evidence.elapsedMs - early.evidence.elapsedMs < minimumSeparationMs) return null;
+  if (Math.hypot(
+    evidence.leaderPosition.x - earlyPosition.x,
+    evidence.leaderPosition.y - earlyPosition.y
+  ) < minimumTravelPx) return null;
+  return { label: 'centipede-late', evidence };
+}
+
 function fitCaptureToLogicalBounds(image, bounds) {
   const width = Math.max(1, Math.round(bounds.width));
   const height = Math.max(1, Math.round(bounds.height));
@@ -543,6 +581,7 @@ function scenarioCapturePolicy({ desktopAvailable, developmentFallbackRequested 
 
 module.exports = {
   boundedCaptureRetry,
+  centipedeCaptureMilestone,
   centeredFormationOffset,
   createNativeWindowUpdateGate,
   createBoundedWindowUpdater,

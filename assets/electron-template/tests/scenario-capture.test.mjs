@@ -8,6 +8,7 @@ import captureHelpers from '../src/scenario-capture.js';
 
 const {
   boundedCaptureRetry,
+  centipedeCaptureMilestone,
   createNativeWindowUpdateGate,
   createBoundedWindowUpdater,
   centeredFormationOffset,
@@ -44,6 +45,81 @@ test('development scenario composites require an explicit flag and remain inelig
   assert.deepEqual(scenarioCapturePolicy({ desktopAvailable: false, developmentFallbackRequested: true }), {
     captureKind: 'synthetic-development',
     releaseEligible: false
+  });
+});
+
+test('centipede evidence waits for every participant to enter the connected action before early capture', () => {
+  const base = {
+    participantIds: ['person-1', 'person-2', 'person-3'],
+    leaderId: 'person-1',
+    captures: [],
+    elapsedMs: 900,
+    cursor: { x: 500, y: 300 }
+  };
+  const forming = {
+    mode: 'centipede',
+    pets: [
+      { id: 'person-1', x: 120, y: 100, action: 'centipede_right' },
+      { id: 'person-2', x: 80, y: 100, action: 'crawl_right' },
+      { id: 'person-3', x: 40, y: 100, action: 'centipede_right' }
+    ]
+  };
+  assert.equal(centipedeCaptureMilestone({ ...base, snapshot: forming }), null);
+
+  const connected = {
+    ...forming,
+    pets: forming.pets.map((pet) => ({ ...pet, action: 'centipede_right' }))
+  };
+  assert.deepEqual(centipedeCaptureMilestone({ ...base, snapshot: connected }), {
+    label: 'centipede-early',
+    evidence: {
+      kind: 'cursor-centipede',
+      elapsedMs: 900,
+      cursor: { x: 500, y: 300 },
+      leaderPosition: { x: 120, y: 100 }
+    }
+  });
+});
+
+test('centipede late evidence waits for a completed early capture and at least 40 pixels of leader travel', () => {
+  const snapshot = {
+    mode: 'centipede',
+    pets: [
+      { id: 'person-1', x: 139.99, y: 100, action: 'centipede_right' },
+      { id: 'person-2', x: 90, y: 100, action: 'centipede_right' }
+    ]
+  };
+  const base = {
+    snapshot,
+    participantIds: ['person-1', 'person-2'],
+    leaderId: 'person-1',
+    elapsedMs: 1300,
+    cursor: { x: 500, y: 300 }
+  };
+
+  assert.equal(centipedeCaptureMilestone({ ...base, captures: [] })?.label, 'centipede-early');
+  const captures = [{
+    label: 'centipede-early',
+    evidence: {
+      kind: 'cursor-centipede',
+      elapsedMs: 900,
+      leaderPosition: { x: 100, y: 100 }
+    }
+  }];
+  assert.equal(centipedeCaptureMilestone({ ...base, captures }), null);
+
+  const moved = {
+    ...snapshot,
+    pets: snapshot.pets.map((pet) => pet.id === 'person-1' ? { ...pet, x: 140 } : pet)
+  };
+  assert.deepEqual(centipedeCaptureMilestone({ ...base, snapshot: moved, captures }), {
+    label: 'centipede-late',
+    evidence: {
+      kind: 'cursor-centipede',
+      elapsedMs: 1300,
+      cursor: { x: 500, y: 300 },
+      leaderPosition: { x: 140, y: 100 }
+    }
   });
 });
 
@@ -633,24 +709,14 @@ test('scenario-only centipede staging recenters an existing connected formation'
   assert.match(mainSource, /centeredFormationOffset\(centipedeFrames, primary\.workArea, \{ x: 0\.34, y: 0\.52 \}\)/);
 });
 
-test('scenario-only eight-person self-poop staging preserves enough cursor travel', () => {
-  const workArea = { x: 560, y: 336, width: 1440, height: 720 };
-  const frames = Array.from({ length: 8 }, (_, index) => ({
-    x: 749.12 + index * 135.68,
-    y: 916,
-    width: 112,
-    height: 112
-  }));
+test('scenario-only eight-person self-poop staging completes the evidence row before relay activation', () => {
+  const scenarioSource = mainSource.slice(mainSource.indexOf('function startScenarioTest'), mainSource.indexOf('function scenarioCursor'));
+  const arrangeIndex = scenarioSource.indexOf('engine.arrangePoopChaseRow');
+  const toggleIndex = scenarioSource.indexOf('engine.togglePoopChase(initialCursor)');
 
-  const offset = centeredFormationOffset(frames, workArea, { x: 0.38, y: 0.58 });
-  const moved = frames.map((frame) => ({ ...frame, x: frame.x + offset.x, y: frame.y + offset.y }));
-  const leader = moved.at(-1);
-  const originCursorX = leader.x + 56;
-  const targetCursorX = Math.min(workArea.x + workArea.width - 220, originCursorX + 280);
-
-  assert.ok(targetCursorX - originCursorX > 32, 'staged cursor travel must clear the configured dead zone');
-  assert.match(mainSource, /centeredFormationOffset\(poopFrames, primary\.workArea, \{ x: 0\.38, y: 0\.58 \}\)/);
-  assert.match(mainSource, /for \(const dropping of engine\.droppings\)[\s\S]*dropping\.x \+= offset\.x[\s\S]*dropping\.y \+= offset\.y/);
+  assert.ok(arrangeIndex >= 0, 'self-poop evidence must deterministically stage every participant inside the work area');
+  assert.ok(toggleIndex > arrangeIndex, 'the relay must start only after the evidence row is staged');
+  assert.match(scenarioSource, /engine\.arrangePoopChaseRow\(poopParticipants\.participants, poopParticipants\.settings, primary\)/);
 });
 
 test('no-self centipede capture fails closed unless cursor poop is visible in the compositor', () => {
@@ -702,6 +768,17 @@ test('relay dropping remains readable without dominating the character scale', (
   assert.ok(
     behaviors.poopChase.poopSize <= maximumSubordinateSize,
     `poopSize ${behaviors.poopChase.poopSize} dominates a ${config.render.spriteSize}px character`
+  );
+});
+
+test('pet sprite uses the same symmetric window padding as engine anchor coordinates', () => {
+  const petCss = fs.readFileSync(fileURLToPath(new URL('../src/renderer/pet.css', import.meta.url)), 'utf8');
+  const spriteRule = petCss.match(/#sprite\s*\{([^}]*)\}/s)?.[1] || '';
+
+  assert.match(
+    spriteRule,
+    /bottom:\s*calc\(\(100%\s*-\s*var\(--sprite-size,\s*112px\)\)\s*\/\s*2\)/,
+    'renderer sprite origin must match the symmetric padding used by BehaviorEngine and BrowserWindow placement'
   );
 });
 
@@ -759,6 +836,25 @@ test('group shout bubbles visually escalate across frames and distinguish dad fr
   assert.match(petCss, /body\[data-phrase-kind="grandpa"\]\[data-shout-frame="2"\]\s+#sprite/s);
 });
 
+test('grandpa shout adds a visibly different three-beat body rhythm instead of only recoloring dad shout', () => {
+  const petCss = fs.readFileSync(fileURLToPath(new URL('../src/renderer/pet.css', import.meta.url)), 'utf8');
+  const frames = [...petCss.matchAll(/body\[data-phrase-kind="grandpa"\]\[data-shout-frame="([012])"\]\s+#sprite\s*\{[^}]*transform:\s*([^;]+);/gs)]
+    .map((match) => ({ frame: Number(match[1]), transform: match[2] }))
+    .sort((left, right) => left.frame - right.frame);
+
+  assert.equal(frames.length, 3, 'grandpa shout needs an explicit body transform for all three beats');
+  assert.equal(new Set(frames.map((frame) => frame.transform)).size, 3, 'grandpa beats must use visibly distinct body transforms');
+  const values = frames.map(({ transform }) => ({
+    rotate: Number(transform.match(/rotate\((-?[\d.]+)deg\)/)?.[1]),
+    translateY: Number(transform.match(/translateY\((-?[\d.]+)px\)/)?.[1]),
+    scale: Number(transform.match(/scale\(([\d.]+)\)/)?.[1])
+  }));
+  assert.ok(values.every((value) => Object.values(value).every(Number.isFinite)), 'each grandpa beat must declare rotation, vertical travel, and scale');
+  assert.ok(Math.max(...values.map((value) => value.rotate)) - Math.min(...values.map((value) => value.rotate)) >= 14, 'grandpa rhythm needs a visible left-right swing');
+  assert.ok(Math.max(...values.map((value) => value.translateY)) - Math.min(...values.map((value) => value.translateY)) >= 12, 'grandpa rhythm needs visible vertical travel');
+  assert.ok(Math.max(...values.map((value) => value.scale)) - Math.min(...values.map((value) => value.scale)) >= 0.2, 'grandpa rhythm needs visible size escalation');
+});
+
 test('scenario capture waits for every renderer sprite to finish loading before saving a frame', () => {
   const petSource = fs.readFileSync(fileURLToPath(new URL('../src/renderer/pet.js', import.meta.url)), 'utf8');
   assert.match(petSource, /dataset\.spriteReady\s*=\s*'false'/);
@@ -777,9 +873,11 @@ test('self-poop scenario captures a real eating climax instead of only a generic
 test('sequence evidence records two cursor-centipede compositions at distinct chase positions', () => {
   const milestoneSource = mainSource.slice(mainSource.indexOf('function captureScenarioMilestone'), mainSource.indexOf('function scenarioCompositionBounds'));
   const captureSource = mainSource.slice(mainSource.indexOf('async function captureScenarioWindows'), mainSource.indexOf('function performanceDuration'));
+  const helperSource = fs.readFileSync(fileURLToPath(new URL('../src/scenario-capture.js', import.meta.url)), 'utf8');
 
-  assert.match(milestoneSource, /scenarioTest\.scenario\s*===\s*'centipede'[\s\S]*centipede-early[\s\S]*centipede-late/);
-  assert.match(milestoneSource, /kind:\s*'cursor-centipede'[\s\S]*cursor:[\s\S]*leaderPosition:/);
+  assert.match(milestoneSource, /scenarioTest\.scenario\s*===\s*'centipede'[\s\S]*centipedeCaptureMilestone\([\s\S]*requestScenarioCapture\(milestone\.label/);
+  assert.match(helperSource, /centipede-early[\s\S]*centipede-late/);
+  assert.match(helperSource, /kind:\s*'cursor-centipede'[\s\S]*cursor:[\s\S]*leaderPosition:/);
   assert.match(captureSource, /evidence:\s*evidence/);
   assert.match(captureSource, /schemaVersion:\s*3/);
 });

@@ -220,23 +220,37 @@ test('self-poop scenario duration scales until every follower can eat once', asy
     selection: { userCharacterId: 'person-6', chaseVariant: 'self-poop' }
   };
   const behaviors = {
+    motion: {
+      maxSpeed: 115
+    },
+    centipede: {
+      maxSpeed: 115
+    },
     poopChase: {
       initialDropDelayMs: 250,
       dropVisibleBeforeEatMs: 650,
       eatDurationMs: 420,
+      mouthHoldMs: 520,
       consumedDelayMs: 240,
       roundResetDelayMs: 600
     }
   };
   const followerCount = 7;
-  const minimumCycleBudget = 250 + followerCount * (650 + 420 + 240 + 600);
+  const captureAndTravelBudgetMs = 2500;
+  const minimumCycleBudget = 250
+    + followerCount * (650 + 520 + captureAndTravelBudgetMs)
+    + 240
+    + 600;
   const duration = scenarioDurationMs('poop-chase', config, behaviors);
 
   assert.ok(duration >= minimumCycleBudget + 4000, `${duration}ms does not leave enough capture margin`);
   assert.equal(duration % 1000, 0, 'capture duration should be rounded to stable whole seconds');
   assert.equal(scenarioDurationMs('dad-shout', config, behaviors), 20000);
   assert.equal(scenarioDurationMs('grandpa-shout', config, behaviors), 20000);
-  assert.equal(scenarioDurationMs('centipede', config, behaviors), 6000);
+  const centipedeDuration = scenarioDurationMs('centipede', config, behaviors);
+  const centipedeFormationAndCaptureBudget = 2200 / 115 * 1000 + 4000;
+  assert.ok(centipedeDuration >= centipedeFormationAndCaptureBudget, `${centipedeDuration}ms does not cover slow connected formation and two captures`);
+  assert.equal(centipedeDuration % 1000, 0, 'centipede capture duration should be rounded to stable whole seconds');
 
   const build = fs.readFileSync(path.join(skillRoot, 'scripts', 'build_project.mjs'), 'utf8');
   assert.match(build, /scenarioDurationMs\(scenario, config, behaviors\)/);

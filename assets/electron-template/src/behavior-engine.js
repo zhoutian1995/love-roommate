@@ -691,6 +691,21 @@ class BehaviorEngine {
     return staged;
   }
 
+  stagedPoopChaseRow(participants) {
+    const size = this.config.render.spriteSize;
+    const staged = participants.map((pet) => ({ ...pet, x: 0, y: 0, direction: 'right' }));
+    const connectionOverlap = Math.max(3, size * 0.04);
+    for (let index = 1; index < staged.length; index += 1) {
+      const previous = staged[index - 1];
+      const pet = staged[index];
+      const rear = this.anchorPoint(previous, 'rear');
+      const mouth = this.anchorsFor(pet, 'right').mouth || this.anchorsFor(pet, 'right').head;
+      pet.x = rear.x - mouth[0] * size + connectionOverlap;
+      pet.y = 0;
+    }
+    return staged;
+  }
+
   centipedeWindowExtents(staged) {
     const rects = staged.map((pet) => this.petWindowRect(pet));
     const minX = Math.min(...rects.map((rect) => rect.left));
@@ -707,8 +722,10 @@ class BehaviorEngine {
     };
   }
 
-  clampLeaderForConnectedFormation(target, participants, display) {
-    const staged = this.stagedCentipede(participants);
+  clampLeaderForConnectedFormation(target, participants, display, layout = 'centipede') {
+    const staged = layout === 'poopChase'
+      ? this.stagedPoopChaseRow(participants)
+      : this.stagedCentipede(participants);
     const extents = this.centipedeWindowExtents(staged);
     const workArea = display.workArea;
     return {
@@ -728,6 +745,7 @@ class BehaviorEngine {
   }
 
   beginFormationTransition(kind, participants, targets) {
+    const fixedPoopDirection = kind === 'self-poop' || kind === 'cursor-poop';
     this.formationTransition = {
       kind,
       participantIds: participants.map((pet) => pet.id),
@@ -735,6 +753,8 @@ class BehaviorEngine {
       startedAt: this.elapsed
     };
     for (const pet of participants) {
+      const target = targets.get(pet.id);
+      if (fixedPoopDirection && target) pet.direction = target.direction === 'left' ? 'left' : 'right';
       pet.dragging = false;
       pet.phrase = '';
       pet.phraseUntil = 0;
@@ -744,13 +764,15 @@ class BehaviorEngine {
   updateFormationTransition(dt) {
     const transition = this.formationTransition;
     if (!transition) return true;
+    const fixedPoopDirection = transition.kind === 'self-poop' || transition.kind === 'cursor-poop';
     let allArrived = true;
     for (const id of transition.participantIds) {
       const pet = this.pets.find((item) => item.id === id);
       const target = transition.targets.get(id);
       if (!pet || !target) continue;
       const deltaX = target.x - pet.x;
-      if (Math.abs(deltaX) >= 0.01) pet.direction = deltaX > 0 ? 'right' : 'left';
+      if (fixedPoopDirection) pet.direction = target.direction === 'left' ? 'left' : 'right';
+      else if (Math.abs(deltaX) >= 0.01) pet.direction = deltaX > 0 ? 'right' : 'left';
       if (!this.moveActorToward(pet, target, dt)) allArrived = false;
       if (transition.kind === 'shout-recipient') pet.action = pet.direction === 'right' ? 'idle_right' : 'idle_left';
       else pet.action = pet.direction === 'right' ? 'crawl_right' : 'crawl_left';
@@ -759,10 +781,15 @@ class BehaviorEngine {
       pet.dragging = false;
     }
     if (allArrived) {
+      const exactPoopRow = transition.kind === 'self-poop' || transition.kind === 'cursor-poop';
       for (const id of transition.participantIds) {
         const pet = this.pets.find((item) => item.id === id);
         const target = transition.targets.get(id);
         if (!pet || !target) continue;
+        if (exactPoopRow) {
+          pet.x = target.x;
+          pet.y = target.y;
+        }
         pet.direction = target.direction === 'left' ? 'left' : 'right';
         pet.vx = 0;
         pet.vy = 0;
@@ -848,6 +875,9 @@ class BehaviorEngine {
       phase: 'forming',
       phaseUntil: Number.POSITIVE_INFINITY
     };
+    this.createRelayDropping(settings, participants);
+    this.poopRelay.phase = 'forming';
+    this.poopRelay.phaseUntil = Number.POSITIVE_INFINITY;
     return this.mode;
   }
 
@@ -862,7 +892,24 @@ class BehaviorEngine {
   }
 
   poopChaseRowTargets(participants, settings, display = null) {
-    return this.centipedeRowTargets(participants, display);
+    if (!participants.length) return { targets: new Map(), skippedReason: 'no-eligible-participants' };
+    const size = this.config.render.spriteSize;
+    const activeDisplay = display || this.getDisplayForPoint({ x: participants[0].x + size / 2, y: participants[0].y + size / 2 });
+    const staged = this.stagedPoopChaseRow(participants);
+    const extents = this.centipedeWindowExtents(staged);
+    if (extents.width > activeDisplay.workArea.width || extents.height > activeDisplay.workArea.height) {
+      return { targets: new Map(), skippedReason: 'insufficient-work-area' };
+    }
+    const centeredLeft = activeDisplay.workArea.x + (activeDisplay.workArea.width - extents.width) / 2;
+    const desiredBottom = activeDisplay.workArea.y + activeDisplay.workArea.height - Math.max(24, size * 0.22);
+    const lowestSafeBottom = activeDisplay.workArea.y + extents.height;
+    const fittedBottom = clamp(desiredBottom, lowestSafeBottom, activeDisplay.workArea.y + activeDisplay.workArea.height);
+    const dx = centeredLeft - extents.minX;
+    const dy = fittedBottom - extents.maxY;
+    return {
+      targets: new Map(staged.map((pet) => [pet.id, { x: pet.x + dx, y: pet.y + dy, direction: 'right' }])),
+      skippedReason: null
+    };
   }
 
   update(dt, cursor) {
@@ -937,7 +984,7 @@ class BehaviorEngine {
     });
   }
 
-  moveLeaderToward(leader, cursor, settings, participants = [leader]) {
+  moveLeaderToward(leader, cursor, settings, participants = [leader], layout = 'centipede') {
     const size = this.config.render.spriteSize;
     const rightHead = this.anchorsFor(leader, 'right').head;
     const leftHead = this.anchorsFor(leader, 'left').head;
@@ -959,7 +1006,7 @@ class BehaviorEngine {
       ? { x: leader.x, y: leader.y }
       : { x: leader.x + deltaX * stopRatio, y: leader.y + deltaY * stopRatio };
     const targetDisplay = this.getDisplayForPoint(safeCursor);
-    const target = this.clampLeaderForConnectedFormation(unconstrainedTarget, participants, targetDisplay);
+    const target = this.clampLeaderForConnectedFormation(unconstrainedTarget, participants, targetDisplay, layout);
     const shared = this.motionSettings();
     this.moveActorToward(leader, target, settings.dt, {
       maxSpeed: Math.min(finite(settings.maxSpeed) && settings.maxSpeed > 0 ? settings.maxSpeed : shared.maxSpeed, shared.maxSpeed),
@@ -1074,6 +1121,26 @@ class BehaviorEngine {
     }
   }
 
+  updatePoopChaseParticipants(participants, dt, cursor, settings) {
+    const leader = participants[0];
+    if (!leader) return;
+    const { movedX, movedY } = this.moveLeaderToward(
+      leader,
+      cursor,
+      { ...settings, dt },
+      participants,
+      'poopChase'
+    );
+    for (let index = 1; index < participants.length; index += 1) {
+      const pet = participants[index];
+      pet.x += movedX;
+      pet.y += movedY;
+      pet.vx = leader.vx;
+      pet.vy = leader.vy;
+      pet.direction = leader.direction;
+    }
+  }
+
   updatePoopChase(dt, cursor) {
     const { settings, leader, followers, participants, hasUser } = this.poopChaseParticipants();
     if (!settings.enabled || !leader || (hasUser && !followers.length)) {
@@ -1086,24 +1153,41 @@ class BehaviorEngine {
       this.updateCursorDropping(cursor, leader, dt);
       if (this.formationTransition) {
         if (!this.updateFormationTransition(dt)) return;
-        this.initializeTrail(leader, participants.length);
         this.poopRelay.phase = 'active';
       }
       const cursorPoop = this.droppings[0] || this.safePoint(cursor, this.anchorPoint(leader, 'head'));
-      this.updateCentipedeParticipants(participants, dt, cursorPoop, {
+      const cursorSettings = {
         ...this.behaviors.centipede,
         maxSpeed: Math.min(settings.maxSpeed || this.behaviors.centipede.maxSpeed, this.behaviors.centipede.maxSpeed),
         maxAcceleration: settings.maxAcceleration || this.behaviors.centipede.maxAcceleration
-      });
+      };
+      this.updatePoopChaseParticipants(participants, dt, cursorPoop, cursorSettings);
+      for (let index = 0; index < participants.length; index += 1) {
+        const pet = participants[index];
+        pet.action = `centipede_${pet.direction}`;
+        pet.effect = index === participants.length - 1 && cursorSettings.flies && this.behaviors.prankEffects.enabled ? 'flies' : '';
+        pet.effectSize = this.config.render.effectSize;
+        pet.phrase = index === 0 ? '别跑！' : '';
+        pet.phraseUntil = index === 0 ? Number.POSITIVE_INFINITY : 0;
+        pet.dragging = false;
+      }
       return;
     }
 
     if (this.formationTransition) {
-      if (!this.updateFormationTransition(dt)) return;
-      this.initializeTrail(leader, participants.length);
-      this.createRelayDropping(settings, participants);
+      const gathered = this.updateFormationTransition(dt);
+      const formingDropping = this.droppings[0];
+      if (formingDropping) {
+        const point = this.anchorPoint(leader, 'rear');
+        Object.assign(formingDropping, { x: point.x, y: point.y, vx: leader.vx, vy: leader.vy });
+      }
+      leader.action = `poop_${leader.direction}`;
+      if (!gathered) return;
+      this.poopRelay.phase = 'sourceHold';
+      this.poopRelay.phaseUntil = this.elapsed + Math.max(0, settings.initialDropDelayMs || settings.dropVisibleBeforeEatMs || 0) / 1000;
+      this.poopRelay.lastUpdatedAt = this.elapsed;
     }
-    this.updateCentipedeParticipants(participants, dt, cursor, settings);
+    this.updatePoopChaseParticipants(participants, dt, cursor, settings);
 
     const participantIds = new Set([leader.id, ...followers.map((pet) => pet.id)]);
     for (const pet of this.pets) {
@@ -1118,12 +1202,14 @@ class BehaviorEngine {
     const nextEater = participants[relay?.targetIndex || 1] || null;
     for (const pet of participants) {
       const eating = this.elapsed < pet.eatUntil;
+      const waitingToEat = !eating && pet.id === nextEater?.id &&
+        (relay?.phase === 'sourceHold' || relay?.phase === 'travelling');
       if (relay?.fixedSource && pet.id === activeSource?.id) pet.action = `poop_${pet.direction}`;
       else if (eating || pet.id === nextEater?.id) pet.action = `eat_${pet.direction}`;
       else pet.action = `crawl_${pet.direction}`;
       pet.effect = eating && this.behaviors.prankEffects.enabled ? 'stink' : '';
       pet.effectSize = eating ? settings.stinkSize : this.config.render.effectSize;
-      pet.phrase = eating ? '啊呜！' : '';
+      pet.phrase = eating ? '啊呜！' : waitingToEat ? '下一个！' : '';
       pet.phraseUntil = eating ? pet.eatUntil : 0;
       pet.dragging = false;
     }
@@ -1234,15 +1320,12 @@ class BehaviorEngine {
 
   eatingContactPoint(source, target, settings) {
     const mouth = this.anchorPoint(target, 'mouth');
-    const rear = this.anchorPoint(source, 'rear');
     const radius = Math.max(1, (settings.poopSize || this.config.render.effectSize || 1) / 2);
-    const deltaX = rear.x - mouth.x;
-    const deltaY = rear.y - mouth.y;
-    const length = Math.hypot(deltaX, deltaY) || 1;
-    const contactOffset = radius * 0.62;
+    const forwardSign = target.direction === 'left' ? -1 : 1;
+    const contactOffset = radius * 0.92;
     return {
-      x: mouth.x + deltaX / length * contactOffset,
-      y: mouth.y + deltaY / length * contactOffset
+      x: mouth.x + forwardSign * contactOffset,
+      y: mouth.y
     };
   }
 
@@ -1346,7 +1429,6 @@ class BehaviorEngine {
     if (relay.phase === 'finalHold') {
       this.moveDroppingToward(dropping, contact, dt, relaySpeed, relayAcceleration);
       if (this.elapsed < relay.phaseUntil) return;
-      this.droppings = [];
       relay.phase = 'roundReset';
       relay.phaseUntil = this.elapsed + Math.max(0, settings.roundResetDelayMs || 0) / 1000;
       return;

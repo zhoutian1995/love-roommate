@@ -47,6 +47,45 @@ function verify(project, scenario, reportPath) {
   ], { encoding: 'utf8' });
 }
 
+function writePoopChaseReport(reportDir, samples, ids) {
+  for (const label of ['active', 'eating-person-2', 'eating-person-3', 'handoff-person-2-to-person-3']) {
+    fs.writeFileSync(path.join(reportDir, `${label}.png`), label);
+  }
+  const horizontalFrames = ids.map((id, index) => ({
+    id,
+    bounds: { x: 100 + index * 180, y: 240, width: 180, height: 180 }
+  }));
+  const report = {
+    scenario: 'poop-chase',
+    samples,
+    captures: [
+      {
+        label: 'active', composition: 'active.png', captureKind: 'desktop-compositor', releaseEligible: true,
+        frames: structuredClone(horizontalFrames),
+        evidence: null
+      },
+      {
+        label: 'eating-person-2', composition: 'eating-person-2.png', captureKind: 'desktop-compositor', releaseEligible: true,
+        frames: structuredClone(horizontalFrames),
+        evidence: { kind: 'eating-climax', elapsedMs: 900, eaterId: 'person-2' }
+      },
+      {
+        label: 'eating-person-3', composition: 'eating-person-3.png', captureKind: 'desktop-compositor', releaseEligible: true,
+        frames: structuredClone(horizontalFrames),
+        evidence: { kind: 'eating-climax', elapsedMs: 2100, eaterId: 'person-3' }
+      },
+      {
+        label: 'handoff-person-2-to-person-3', composition: 'handoff-person-2-to-person-3.png', captureKind: 'desktop-compositor', releaseEligible: true,
+        frames: structuredClone(horizontalFrames),
+        evidence: { kind: 'handoff-return', elapsedMs: 1500, returningEaterId: 'person-2', nextEaterId: 'person-3' }
+      }
+    ]
+  };
+  const reportPath = path.join(reportDir, 'report.json');
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  return { reportPath, report };
+}
+
 test('scenario gate rejects synthetic development captures and requires release-eligible desktop compositor evidence', (t) => {
   const { project, reportDir, samples, ids } = fixture(t, { scenario: 'centipede', selfId: null });
   const captures = [
@@ -154,14 +193,21 @@ test('scenario gate rejects self-poop evidence with only one eater and no return
   assert.notEqual(result.status, 0, 'one eater without a return handoff unexpectedly passed');
   assert.match(result.stderr, /two different eater|two distinct eater|handoff|return/i);
 
-  for (const label of ['eating-person-2', 'eating-person-3', 'handoff-person-2-to-person-3']) {
+  for (const label of ['active', 'eating-person-2', 'eating-person-3', 'handoff-person-2-to-person-3']) {
     fs.writeFileSync(path.join(reportDir, `${label}.png`), label);
   }
-  const fullFrames = ids.map((id) => ({ id }));
+  const fullFrames = ids.map((id, index) => ({
+    id,
+    bounds: { x: 100 + index * 180, y: 240, width: 180, height: 180 }
+  }));
   const valid = {
     scenario: 'poop-chase',
     samples,
     captures: [
+      {
+        label: 'active', composition: 'active.png', captureKind: 'desktop-compositor', releaseEligible: true, frames: fullFrames,
+        evidence: null
+      },
       {
         label: 'eating-person-2', composition: 'eating-person-2.png', captureKind: 'desktop-compositor', releaseEligible: true, frames: fullFrames,
         evidence: { kind: 'eating-climax', elapsedMs: 900, eaterId: 'person-2' }
@@ -180,3 +226,67 @@ test('scenario gate rejects self-poop evidence with only one eater and no return
   const accepted = verify(project, 'poop-chase', reportPath);
   assert.equal(accepted.status, 0, accepted.stderr);
 });
+
+test('scenario gate rejects self-poop samples whose horizontal queue Y spread exceeds one pixel', (t) => {
+  const { project, reportDir, samples, ids } = fixture(t, { scenario: 'poop-chase', selfId: 'person-1' });
+  const diagonalSamples = samples.map((sample) => ({
+    ...sample,
+    pets: sample.pets.map((pet, index) => ({ ...pet, y: 100 + index * 2 }))
+  }));
+  const { reportPath } = writePoopChaseReport(reportDir, diagonalSamples, ids);
+
+  const result = verify(project, 'poop-chase', reportPath);
+  assert.notEqual(result.status, 0, 'poop-chase samples with a 4px Y spread unexpectedly passed the horizontal queue release gate');
+  assert.match(result.stderr, /horizontal|y spread|aligned|one pixel/i);
+});
+
+test('scenario gate requires the scheduled active self-poop compositor capture', (t) => {
+  const { project, reportDir, samples, ids } = fixture(t, { scenario: 'poop-chase', selfId: 'person-1' });
+  const { reportPath, report } = writePoopChaseReport(reportDir, samples, ids);
+  report.captures = report.captures.filter((capture) => capture.label !== 'active');
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+
+  const result = verify(project, 'poop-chase', reportPath);
+  assert.notEqual(result.status, 0, 'poop-chase report without the scheduled active compositor unexpectedly passed');
+  assert.match(result.stderr, /active.*capture|capture.*active/i);
+});
+
+test('scenario gate rejects a self-poop sample that duplicates one character while omitting another', (t) => {
+  const { project, reportDir, samples, ids } = fixture(t, { scenario: 'poop-chase', selfId: 'person-1' });
+  const forgedSamples = structuredClone(samples);
+  forgedSamples[4].pets[2] = { ...forgedSamples[4].pets[1] };
+  const { reportPath } = writePoopChaseReport(reportDir, forgedSamples, ids);
+
+  const result = verify(project, 'poop-chase', reportPath);
+  assert.notEqual(result.status, 0, 'sample with a duplicate person-2 and no person-3 unexpectedly passed');
+  assert.match(result.stderr, /every character|duplicate|missing|participant/i);
+});
+
+test('scenario gate accepts a self-poop row whose Y spread is exactly one pixel', (t) => {
+  const { project, reportDir, samples, ids } = fixture(t, { scenario: 'poop-chase', selfId: 'person-1' });
+  const boundarySamples = samples.map((sample) => ({
+    ...sample,
+    pets: sample.pets.map((pet, index) => ({ ...pet, y: 100 + (index === 1 ? 1 : 0) }))
+  }));
+  const { reportPath } = writePoopChaseReport(reportDir, boundarySamples, ids);
+
+  const result = verify(project, 'poop-chase', reportPath);
+  assert.equal(result.status, 0, result.stderr);
+});
+
+for (const captureLabel of ['active', 'eating-person-2', 'eating-person-3', 'handoff-person-2-to-person-3']) {
+  test(`scenario gate rejects ${captureLabel} compositor frame bounds whose horizontal queue Y spread exceeds one pixel`, (t) => {
+    const { project, reportDir, samples, ids } = fixture(t, { scenario: 'poop-chase', selfId: 'person-1' });
+    const { reportPath, report } = writePoopChaseReport(reportDir, samples, ids);
+    const capture = report.captures.find((entry) => entry.label === captureLabel);
+    capture.frames = capture.frames.map((frame, index) => ({
+      ...frame,
+      bounds: { ...frame.bounds, y: frame.bounds.y + index * 2 }
+    }));
+    fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+
+    const result = verify(project, 'poop-chase', reportPath);
+    assert.notEqual(result.status, 0, `${captureLabel} compositor bounds with a 4px Y spread unexpectedly passed the horizontal queue release gate`);
+    assert.match(result.stderr, /horizontal|y spread|aligned|one pixel/i);
+  });
+}

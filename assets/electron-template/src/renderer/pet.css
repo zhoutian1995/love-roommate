@@ -23,7 +23,7 @@ body {
 #sprite {
   position: absolute;
   left: 50%;
-  bottom: 8px;
+  bottom: calc((100% - var(--sprite-size, 112px)) / 2);
   width: var(--sprite-size, 112px);
   height: var(--sprite-size, 112px);
   object-fit: contain;
@@ -178,12 +178,20 @@ body[data-phrase-kind="grandpa"] #bubble::after {
   background: #fff7ff;
 }
 
+body[data-phrase-kind="grandpa"] #sprite {
+  transform-origin: center bottom;
+}
+
+body[data-phrase-kind="grandpa"][data-shout-frame="0"] #sprite {
+  transform: translateX(-50%) translateY(8px) scale(0.92) rotate(-8deg);
+}
+
 body[data-phrase-kind="grandpa"][data-shout-frame="1"] #sprite {
-  transform: translateX(-50%) translateY(2px) scale(1.1) rotate(3deg);
+  transform: translateX(-50%) translateY(-2px) scale(1.08) rotate(8deg);
 }
 
 body[data-phrase-kind="grandpa"][data-shout-frame="2"] #sprite {
-  transform: translateX(-50%) translateY(5px) scale(1.17) rotate(-5deg);
+  transform: translateX(-50%) translateY(-6px) scale(1.18) rotate(-8deg);
 }
 
 @keyframes pop {

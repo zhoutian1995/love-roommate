@@ -503,6 +503,12 @@ test('runtime performance helpers suppress motion-only IPC and slow the shared t
   assert.ok(audit.nextTickerDelay(true) >= audit.nextTickerDelay(false) * 5);
 });
 
+test('measured performance phases wait beyond exact release minimums', { skip: !available }, () => {
+  assert.ok(audit.performancePhaseWaitMs(30000) > 30000);
+  assert.ok(audit.performancePhaseWaitMs(600000) > 600000);
+  assert.match(mainSource, /waitForPerformance\(performancePhaseWaitMs\(durationMs\)\)/);
+});
+
 test('paused pets still process drag positions without resuming animation', () => {
   assert.match(mainSource, /if \(engine\.paused && dragStates\.size === 0\)/);
   assert.match(mainSource, /const snapshot = engine\.paused \? engine\.snapshot\(\) : engine\.update\(dt, cursor\)/);

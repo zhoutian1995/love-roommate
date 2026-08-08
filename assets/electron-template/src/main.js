@@ -29,6 +29,7 @@ const {
   evaluatePerformanceReport,
   nextTickerSchedule,
   nextTickerDelay,
+  performancePhaseWaitMs,
   petRenderKey,
   runtimeFingerprintForProject,
   summarizePerformancePhase,
@@ -36,6 +37,7 @@ const {
 } = require('./performance-audit');
 const {
   boundedCaptureRetry,
+  centipedeCaptureMilestone,
   centeredFormationOffset,
   createBoundedWindowUpdater,
   createNativeWindowUpdateGate,
@@ -698,28 +700,18 @@ function startScenarioTest() {
     leader.x = primary.workArea.x + Math.min(360, primary.workArea.width * 0.32);
     leader.y = primary.workArea.y + primary.workArea.height * 0.24;
     leader.direction = direction;
+    if (scenario === 'poop-chase') {
+      const staged = engine.arrangePoopChaseRow(poopParticipants.participants, poopParticipants.settings, primary);
+      if (staged.skippedReason) return;
+      leader = poopParticipants.participants[0] || leader;
+    }
     const initialCursor = { x: leader.x + followAnchor.x * size, y: leader.y + followAnchor.y * size };
     if (scenario === 'poop-chase') {
       engine.togglePoopChase(initialCursor);
-      const poopFrames = poopParticipants.participants.map((pet) => ({
-        x: pet.x,
-        y: pet.y,
-        width: size,
-        height: size
-      }));
-      const offset = centeredFormationOffset(poopFrames, primary.workArea, { x: 0.38, y: 0.58 });
-      for (const pet of poopParticipants.participants) {
-        pet.x += offset.x;
-        pet.y += offset.y;
-      }
-      for (const dropping of engine.droppings) {
-        dropping.x += offset.x;
-        dropping.y += offset.y;
-      }
-      leader = poopParticipants.participants[0] || leader;
     } else {
       engine.toggleCentipede(initialCursor);
       const centipedeParticipants = engine.centipedeParticipants();
+      participantIds = centipedeParticipants.map((pet) => pet.id);
       const centipedeFrames = centipedeParticipants.map((pet) => ({
         x: pet.x,
         y: pet.y,
@@ -892,17 +884,17 @@ function captureScenarioMilestone(snapshot) {
   if (!scenarioTest || !process.env.PET_SCENARIO_CAPTURE_DIR) return;
   const elapsed = (Date.now() - scenarioTest.startedAt) / 1000;
   if (scenarioTest.scenario === 'centipede') {
-    const leader = snapshot.pets.find((pet) => pet.id === scenarioTest.leaderId);
     const cursor = scenarioCursor();
-    if (!leader || !cursor) return;
-    const evidence = {
-      kind: 'cursor-centipede',
-      elapsedMs: Math.round(elapsed * 1000),
-      cursor: { x: Math.round(cursor.x), y: Math.round(cursor.y) },
-      leaderPosition: { x: Number(leader.x.toFixed(2)), y: Number(leader.y.toFixed(2)) }
-    };
-    if (elapsed >= 0.35) requestScenarioCapture('centipede-early', snapshot.mode, evidence);
-    if (elapsed >= 1.05) requestScenarioCapture('centipede-late', snapshot.mode, evidence);
+    if (!cursor) return;
+    const milestone = centipedeCaptureMilestone({
+      snapshot,
+      participantIds: scenarioTest.participantIds,
+      leaderId: scenarioTest.leaderId,
+      captures: scenarioTest.captures,
+      elapsedMs: elapsed * 1000,
+      cursor
+    });
+    if (milestone) requestScenarioCapture(milestone.label, snapshot.mode, milestone.evidence);
     return;
   }
   if (scenarioTest.scenario === 'poop-chase') {
@@ -1477,7 +1469,7 @@ async function runTimedPerformancePhase(name, durationMs, enter) {
   if (enter) enter();
   await waitForPerformance(1000);
   beginPerformancePhase(name);
-  await waitForPerformance(durationMs);
+  await waitForPerformance(performancePhaseWaitMs(durationMs));
   endPerformancePhase();
   performanceAudit.cursorMode = null;
 }

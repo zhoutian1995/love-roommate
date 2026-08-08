@@ -328,6 +328,24 @@ function verifyScenarioReport(scenario, reportPath) {
     if (!distinctMoments) fail('Centipede evidence must show two distinct times and chase positions at least 40 pixels apart.');
   }
   if (scenario === 'poop-chase') {
+    const characterSet = new Set(characterIds);
+    const horizontalSpread = (values, description) => {
+      if (values.length !== characterIds.length || values.some((value) => !Number.isFinite(value))) {
+        fail(`${description} is missing finite geometry for every character.`);
+      }
+      if (Math.max(...values) - Math.min(...values) > 1) {
+        fail(`${description} is not horizontally aligned within one pixel.`);
+      }
+    };
+    for (const sample of samples) {
+      const row = (sample.pets || []).filter((pet) => characterSet.has(pet.id));
+      const rowIds = new Set(row.map((pet) => pet.id));
+      if (row.length !== characterIds.length || rowIds.size !== characterIds.length
+        || characterIds.some((id) => !rowIds.has(id))) {
+        fail('Poop chase samples must contain every character exactly once.');
+      }
+      horizontalSpread(row.map((pet) => pet.y), 'Poop chase sampled queue');
+    }
     if (samples.some((sample) => (sample.droppings || []).length !== 1)) fail('Poop relay must keep exactly one dropping in every sampled frame.');
     const sources = new Set(samples.flatMap((sample) => (sample.droppings || []).map((dropping) => dropping.sourceId)).filter(Boolean));
     const expectedSource = config.selection?.userCharacterId;
@@ -354,6 +372,16 @@ function verifyScenarioReport(scenario, reportPath) {
     });
     if (!handoffCapture) fail('Poop chase evidence is missing a return handoff composition between different eaters.');
     requireFullComposition(handoffCapture, 'Poop chase return handoff capture');
+    const activeCapture = captures.find((capture) => capture.label === 'active');
+    if (!activeCapture) fail('Poop chase evidence is missing the scheduled active capture.');
+    requireFullComposition(activeCapture, 'Poop chase active capture');
+    for (const capture of captures) {
+      const rowFrames = characterIds.map((id) => (capture.frames || []).find((frame) => frame.id === id));
+      horizontalSpread(
+        rowFrames.map((frame) => frame?.bounds?.y),
+        `Poop chase capture ${capture.label || 'unlabeled'} queue`
+      );
+    }
   }
 }
 

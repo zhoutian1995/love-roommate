@@ -48,6 +48,10 @@ function nextTickerDelay(paused) {
   return paused ? 250 : 33;
 }
 
+function performancePhaseWaitMs(durationMs) {
+  return Math.max(0, Number(durationMs) || 0) + 250;
+}
+
 function compensatedTickerDelay(paused, frameWorkMs) {
   return Math.max(0, nextTickerDelay(paused) - Math.max(0, Number(frameWorkMs) || 0));
 }
@@ -470,6 +474,7 @@ module.exports = {
   evaluatePerformanceReport,
   nextTickerSchedule,
   nextTickerDelay,
+  performancePhaseWaitMs,
   petRenderKey,
   runtimeBuildMetadataForProject,
   runtimeFingerprintForProject,
